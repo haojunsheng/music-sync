@@ -114,6 +114,28 @@ class TestCloudSongExists:
         client = _client(monkeypatch, stub)
         assert client.check_cloud_song_exists("断桥残雪", "许嵩") is True
 
+    def test_matches_real_response_shape(self, monkeypatch, stub_session, fake_response):
+        """线上 /api/v1/cloud/get 的 privateCloud 里字段名是 song 而不是 songName。"""
+        _login_config()
+        payload = {"code": 200, "data": [
+            {"privateCloud": {"song": "断桥残雪", "artist": "许嵩", "fileSize": 45474978},
+             "simpleSong": {"name": "断桥残雪"}},
+        ]}
+        stub = stub_session({CLOUD_URL_KEY: fake_response(200, json_data=payload)})
+        client = _client(monkeypatch, stub)
+        assert client.check_cloud_song_exists("断桥残雪", "许嵩") is True
+        assert client.check_cloud_song_exists("幻听", "许嵩") is False
+
+    def test_artist_is_required_when_target_artist_known(self, monkeypatch, stub_session, fake_response):
+        """云盘条目的 artist 为空时不判定为同一首：宁可能重复上传，也不要漏传。"""
+        _login_config()
+        payload = {"code": 200, "data": [{"privateCloud": {"song": "素颜", "artist": ""}}]}
+        stub = stub_session({CLOUD_URL_KEY: fake_response(200, json_data=payload)})
+        client = _client(monkeypatch, stub)
+        assert client.check_cloud_song_exists("素颜", "许嵩") is False
+        # 查询方不带 artist 时才退化成按歌名匹配
+        assert client.check_cloud_song_exists("素颜", "") is True
+
 
 class TestWeapiRequest:
     def test_returns_dict_on_success(self, monkeypatch, stub_session, fake_response):
