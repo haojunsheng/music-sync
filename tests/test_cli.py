@@ -123,3 +123,40 @@ class TestBatchCommand:
         _run(monkeypatch, ["batch", "songs.csv", "--dry-run"])
         assert captured["csv_path"] == "songs.csv"
         assert captured["dry_run"] is True
+
+
+class TestArtistCommand:
+    def test_forwards_name_and_limit(self, monkeypatch):
+        captured = {}
+
+        def fake_artist(artist, limit=50, dry_run=False, no_upload=False):
+            captured.update(artist=artist, limit=limit, dry_run=dry_run, no_upload=no_upload)
+
+        monkeypatch.setattr(cli, "sync_artist", fake_artist)
+        _run(monkeypatch, ["artist", "许嵩", "--limit", "30"])
+        assert captured == {"artist": "许嵩", "limit": 30, "dry_run": False, "no_upload": False}
+
+    def test_default_limit_is_50(self, monkeypatch):
+        captured = {}
+
+        def fake_artist(artist, limit=50, dry_run=False, no_upload=False):
+            captured["limit"] = limit
+
+        monkeypatch.setattr(cli, "sync_artist", fake_artist)
+        _run(monkeypatch, ["artist", "许嵩"])
+        assert captured["limit"] == 50
+
+    def test_flags_are_forwarded(self, monkeypatch):
+        captured = {}
+
+        def fake_artist(artist, limit=50, dry_run=False, no_upload=False):
+            captured.update(dry_run=dry_run, no_upload=no_upload)
+
+        monkeypatch.setattr(cli, "sync_artist", fake_artist)
+        _run(monkeypatch, ["artist", "许嵩", "--dry-run", "--no-upload"])
+        assert captured == {"dry_run": True, "no_upload": True}
+
+    def test_artist_requires_a_name(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["music-sync", "artist"])
+        with pytest.raises(SystemExit):
+            cli.main()

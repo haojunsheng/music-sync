@@ -15,6 +15,7 @@ from music_sync.validator import validate_audio_file
 from music_sync.lyrics import get_lyrics
 from music_sync.tagger import apply_tags_and_verify
 from music_sync.netease import NetEaseClient
+from music_sync.artist import get_artist_top_songs
 from music_sync.sources import get_source, SOURCE_REGISTRY
 from music_sync.sources.base import TrackCandidate
 
@@ -238,7 +239,44 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
         console.print(f"[yellow]⚠️ 云盘同步未完成，但本地文件已就绪: {output_path}[/yellow]")
     return True
 
+def sync_song_list(songs: List[dict], dry_run: bool = False, no_upload: bool = False, title: str = "批量同步结果汇总"):
+    """逐首同步并输出汇总表，返回 (成功数, 失败数)。"""
+    console.print(f"[bold cyan]开始批量同步，共 {len(songs)} 首歌曲...[/bold cyan]")
+    success_count = 0
+    fail_count = 0
+
+    results = []
+    for s in songs:
+        name = s.get("title", "")
+        artist = s.get("artist", "")
+        try:
+            ok = sync_single_track(name, artist, s.get("album", ""), dry_run, no_upload)
+        except Exception as e:
+            fail_count += 1
+            results.append((name, artist, f"异常: {e}", "red"))
+            continue
+        if ok:
+            success_count += 1
+            results.append((name, artist, "成功", "green"))
+        else:
+            fail_count += 1
+            results.append((name, artist, "失败", "red"))
+
+    table = Table(title=title)
+    table.add_column("歌名", style="cyan")
+    table.add_column("歌手", style="magenta")
+    table.add_column("状态")
+
+    for name, artist, status, color in results:
+        table.add_row(name, artist, f"[{color}]{status}[/{color}]")
+
+    console.print(table)
+    console.print(f"\n[bold]总计: {len(songs)} 首 | 成功: [green]{success_count}[/green] | 失败: [red]{fail_count}[/red][/bold]")
+    return success_count, fail_count
+
+
 def sync_batch_csv(csv_path: str, dry_run: bool = False, no_upload: bool = False):
+    """从 CSV 批量同步。表头格式: title,artist[,album]"""
     if not os.path.exists(csv_path):
         console.print(f"[red]CSV 文件不存在: {csv_path}[/red]")
         return
@@ -253,31 +291,19 @@ def sync_batch_csv(csv_path: str, dry_run: bool = False, no_upload: bool = False
             if title:
                 songs.append({"title": title, "artist": artist, "album": album})
 
-    console.print(f"[bold cyan]开始批量同步，共 {len(songs)} 首歌曲...[/bold cyan]")
-    success_count = 0
-    fail_count = 0
+    sync_song_list(songs, dry_run, no_upload)
 
-    results = []
-    for s in songs:
-        try:
-            ok = sync_single_track(s["title"], s["artist"], s["album"], dry_run, no_upload)
-            if ok:
-                success_count += 1
-                results.append((s["title"], s["artist"], "成功", "green"))
-            else:
-                fail_count += 1
-                results.append((s["title"], s["artist"], "失败", "red"))
-        except Exception as e:
-            fail_count += 1
-            results.append((s["title"], s["artist"], f"异常: {e}", "red"))
 
-    table = Table(title="批量同步结果汇总")
-    table.add_column("歌名", style="cyan")
-    table.add_column("歌手", style="magenta")
-    table.add_column("状态")
+def sync_artist(artist: str, limit: int = 50, dry_run: bool = False, no_upload: bool = False):
+    """批量同步某歌手的热门歌曲（数量可通过 limit 调整）。"""
+    console.print(f"\n[bold cyan]>>> 获取歌手热门歌曲: {artist}（最多 {limit} 首）[/bold cyan]")
+    songs = get_artist_top_songs(artist, limit)
+    if not songs:
+        console.print(f"[bold red]❌ 未能获取歌手热门歌曲: {artist}[/bold red]")
+        return
 
-    for t, a, status, color in results:
-        table.add_row(t, a, f"[{color}]{status}[/{color}]")
+    console.print(f"  [green]✓[/green] 共 {len(songs)} 首:")
+    for i, s in enumerate(songs, 1):
+        console.print(f"    [dim]{i:>3}. {s['title']} - {s['artist']}[/dim]")
 
-    console.print(table)
-    console.print(f"\n[bold]总计: {len(songs)} 首 | 成功: [green]{success_count}[/green] | 失败: [red]{fail_count}[/red][/bold]")
+    sync_song_list(songs, dry_run, no_upload, title=f"{artist} · 热门歌曲同步结果")

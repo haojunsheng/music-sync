@@ -477,3 +477,100 @@ class TestOutputPathLayout:
 
         pipeline.sync_single_track("断桥残雪", "许嵩", no_upload=True)
         assert captured["path"] == str(tmp_path / "许嵩" / "断桥残雪.mp3")
+
+
+class TestSyncArtist:
+    def _songs(self):
+        return [
+            {"title": "素颜", "artist": "许嵩/何曼婷", "album": "素颜", "duration": 238},
+            {"title": "幻听", "artist": "许嵩", "album": "梦游计", "duration": 273},
+        ]
+
+    def test_fetches_then_syncs_each_song(self, monkeypatch):
+        monkeypatch.setattr(pipeline, "get_artist_top_songs", lambda a, limit: self._songs())
+        seen = []
+
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+            seen.append((title, artist, album))
+            return True
+
+        monkeypatch.setattr(pipeline, "sync_single_track", fake_sync)
+        pipeline.sync_artist("许嵩", limit=2, dry_run=True)
+
+        assert seen == [("素颜", "许嵩/何曼婷", "素颜"), ("幻听", "许嵩", "梦游计")]
+
+    def test_limit_is_passed_to_fetcher(self, monkeypatch):
+        captured = {}
+
+        def fake_fetch(artist, limit):
+            captured.update(artist=artist, limit=limit)
+            return []
+
+        monkeypatch.setattr(pipeline, "get_artist_top_songs", fake_fetch)
+        pipeline.sync_artist("许嵩", limit=7)
+        assert captured == {"artist": "许嵩", "limit": 7}
+
+    def test_reports_when_no_songs_found(self, monkeypatch, capsys):
+        monkeypatch.setattr(pipeline, "get_artist_top_songs", lambda a, limit: [])
+        pipeline.sync_artist("不存在歌手")
+        assert "未能获取歌手热门歌曲" in capsys.readouterr().out
+
+    def test_lists_songs_before_syncing(self, monkeypatch, capsys):
+        monkeypatch.setattr(pipeline, "get_artist_top_songs", lambda a, limit: self._songs())
+        monkeypatch.setattr(
+            pipeline, "sync_single_track",
+            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False: True,
+        )
+        pipeline.sync_artist("许嵩", limit=2)
+        out = capsys.readouterr().out
+        assert "素颜" in out and "幻听" in out
+        assert "共 2 首" in out
+
+    def test_summary_counts_success_and_failure(self, monkeypatch, capsys):
+        monkeypatch.setattr(pipeline, "get_artist_top_songs", lambda a, limit: self._songs())
+        results = {"素颜": True, "幻听": False}
+        monkeypatch.setattr(
+            pipeline, "sync_single_track",
+            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False: results[title],
+        )
+        pipeline.sync_artist("许嵩", limit=2)
+        out = capsys.readouterr().out
+        assert "成功: 1" in out
+        assert "失败: 1" in out
+
+    def test_one_failure_does_not_stop_the_rest(self, monkeypatch):
+        monkeypatch.setattr(pipeline, "get_artist_top_songs", lambda a, limit: self._songs())
+        seen = []
+
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+            seen.append(title)
+            if title == "素颜":
+                raise RuntimeError("boom")
+            return True
+
+        monkeypatch.setattr(pipeline, "sync_single_track", fake_sync)
+        # 单首异常不应中断整批
+        pipeline.sync_artist("许嵩", limit=2)
+        assert seen == ["素颜", "幻听"]
+
+
+class TestSyncSongList:
+    def test_returns_success_and_failure_counts(self, monkeypatch):
+        songs = [{"title": "A", "artist": "a"}, {"title": "B", "artist": "b"}]
+        results = {"A": True, "B": False}
+        monkeypatch.setattr(
+            pipeline, "sync_single_track",
+            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False: results[title],
+        )
+        assert pipeline.sync_song_list(songs) == (1, 1)
+
+    def test_missing_optional_fields_are_tolerated(self, monkeypatch):
+        seen = []
+
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+            seen.append((title, artist, album))
+            return True
+
+        monkeypatch.setattr(pipeline, "sync_single_track", fake_sync)
+        pipeline.sync_song_list([{"title": "只有歌名"}])
+        assert seen == [("只有歌名", "", "")]

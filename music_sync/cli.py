@@ -5,7 +5,7 @@ from rich.table import Table
 
 from music_sync.config import load_config, save_config, DEFAULT_CONFIG_FILE
 from music_sync.netease import login_qr
-from music_sync.pipeline import sync_single_track, sync_batch_csv
+from music_sync.pipeline import sync_single_track, sync_batch_csv, sync_artist
 
 console = Console()
 
@@ -34,6 +34,14 @@ def handle_sync(args):
 def handle_batch(args):
     sync_batch_csv(
         csv_path=args.csv_file,
+        dry_run=args.dry_run,
+        no_upload=args.no_upload
+    )
+
+def handle_artist(args):
+    sync_artist(
+        artist=args.name,
+        limit=args.limit,
         dry_run=args.dry_run,
         no_upload=args.no_upload
     )
@@ -116,6 +124,16 @@ def main():
     batch_parser.add_argument("--dry-run", action="store_true", help="只预览，不下载与上传")
     batch_parser.add_argument("--no-upload", action="store_true", help="仅下载打标，不上传")
 
+    # artist
+    artist_parser = subparsers.add_parser("artist", help="批量同步某歌手的热门歌曲")
+    artist_parser.add_argument("name", help="歌手名称，例如：许嵩")
+    artist_parser.add_argument(
+        "--limit", type=int, default=50,
+        help="获取热门歌曲的数量（默认 50）"
+    )
+    artist_parser.add_argument("--dry-run", action="store_true", help="只预览，不下载与上传")
+    artist_parser.add_argument("--no-upload", action="store_true", help="仅下载打标，不上传")
+
     # config
     config_parser = subparsers.add_parser("config", help="查看或修改配置")
     config_parser.add_argument("--qq-cookie", help="设置 QQ 音乐会员 Cookie")
@@ -138,6 +156,8 @@ def main():
         handle_sync(args)
     elif args.command == "batch":
         handle_batch(args)
+    elif args.command == "artist":
+        handle_artist(args)
     elif args.command == "config":
         handle_config(args)
     else:

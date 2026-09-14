@@ -12,6 +12,35 @@ from music_sync.netease_crypto import eapi_encrypt, weapi_encrypt
 
 console = Console()
 
+# 网易云个人云盘（private cloud）上传通道使用的固定常量。
+CLOUD_BUCKET = "jd-musicrep-privatecloud-audio-public"
+# NOS 上传节点是动态下发的，不能写死；必须先向 wanproxy 询问本次可用的上传域名。
+NOS_LBS_URL = "https://wanproxy.127.net/lbs?version=1.0&bucketname={bucket}"
+# 无损档位固定上报 999000，有损兜底上报 320000（与官方客户端一致）。
+CLOUD_LOSSLESS_BITRATE = "999000"
+CLOUD_LOSSY_BITRATE = "320000"
+CLOUD_LOSSLESS_EXT = ("flac", "ape", "wav")
+# info/v2 的 album 为空时官方会填「未知专辑」
+DEFAULT_CLOUD_ALBUM = "未知专辑"
+
+
+def _clean_cloud_field(value: str, fallback: str) -> str:
+    """清洗 info/v2 的 song/artist/album 字段。
+
+    网易云要求这三个字段不得包含 `.` 与 `/`，否则提交直接失败。
+    """
+    cleaned = (value or "").replace(".", " ").replace("/", " ").strip()
+    return cleaned or fallback
+
+
+def _encode_object_key(object_key: str) -> str:
+    """NOS 上传路径里的 objectKey 必须把 `/` 转义成 %2F，否则会被当成多级目录。"""
+    return object_key.replace("/", "%2F")
+
+
+def _cloud_bitrate(ext: str) -> str:
+    return CLOUD_LOSSLESS_BITRATE if ext in CLOUD_LOSSLESS_EXT else CLOUD_LOSSY_BITRATE
+
 class NetEaseClient:
     def __init__(self):
         self.session = get_session()
@@ -220,7 +249,56 @@ class NetEaseClient:
                 return True
         return False
 
+    def _upload_stream_to_nos(self, object_key: str, token: str, md5_hex: str,
+                              content: bytes, ext: str) -> bool:
+        """把音频二进制流直传到 NOS。
+
+        节点地址由 wanproxy 的 lbs 接口动态下发，URL 形如
+        `<上传域名>/<bucket>/<objectKey 转义后>?offset=0&complete=true&version=1.0`。
+        """
+        try:
+            lbs_resp = self.session.get(NOS_LBS_URL.format(bucket=CLOUD_BUCKET), timeout=15)
+            lbs = lbs_resp.json()
+        except Exception as e:
+            console.print(f"[red]获取 NOS 上传节点失败: {e}[/red]")
+            return False
+
+        hosts = lbs.get("upload") or []
+        if not hosts:
+            console.print("[red]获取 NOS 上传节点失败: lbs 未返回可用域名[/red]")
+            return False
+
+        nos_url = (
+            f"{hosts[0]}/{CLOUD_BUCKET}/{_encode_object_key(object_key)}"
+            "?offset=0&complete=true&version=1.0"
+        )
+        headers = {
+            "x-nos-token": token,
+            "Content-MD5": md5_hex,
+            "Content-Type": f"audio/{ext}" if ext in CLOUD_LOSSLESS_EXT + ("mp3",) else "audio/mpeg",
+            "Content-Length": str(len(content)),
+        }
+        try:
+            upload_resp = self.session.post(nos_url, data=content, headers=headers, timeout=180)
+        except Exception as e:
+            console.print(f"[red]NOS 音频流上传异常: {e}[/red]")
+            return False
+
+        if upload_resp.status_code not in (200, 201):
+            console.print(f"[red]NOS 音频流上传失败 (HTTP {upload_resp.status_code})[/red]")
+            return False
+        return True
+
     def upload_to_cloud(self, file_path: str, title: str, artist: str, album: str) -> bool:
+        """把本地文件同步进网易云个人云盘。
+
+        官方云盘直传共 5 步，缺任何一步都不会出现在「我的云盘」里：
+          1. /api/cloud/upload/check        —— 用 md5 换 needUpload + songId
+          2. /api/nos/token/alloc           —— 换 NOS token / objectKey / resourceId
+          3. NOS 直传二进制流（needUpload 为 true 时才需要）
+          4. /api/upload/cloud/info/v2      —— 登记资源元信息，拿新 songId
+          5. /api/cloud/pub/v2              —— 发布到个人云盘（这一步不能省）
+        """
         if not self.is_logged_in():
             console.print("[red]网易云未登录或 Cookie 失效，请先执行: python -m music_sync login[/red]")
             return False
@@ -239,83 +317,90 @@ class NetEaseClient:
         with open(file_path, "rb") as f:
             content = f.read()
         md5_hex = hashlib.md5(content).hexdigest()
+        bitrate = _cloud_bitrate(ext)
 
-        # Step 1: 上传检查（eapi；weapi 已下线，返回 200 + 空 body）
-        check_data = {
-            "uploadType": 0,
-            "songs": json.dumps([{
-                "md5": md5_hex,
-                "songId": "0",
-                "filename": os.path.basename(file_path),
-                "song": title,
-                "artist": artist,
-                "album": album,
-                "bitrate": "320000",
-                "ext": ext
-            }])
-        }
-        check_res = self.eapi_request("/api/cloud/upload/check", check_data)
-        # 接口异常时 data 可能为 null，直接取 [0] 会抛 TypeError
-        check_items = check_res.get("data") or [{}]
-        need_upload = check_items[0].get("needUpload", True)
-        song_id = check_items[0].get("songId", "")
+        # 文件名清洗规则与官方客户端一致：去掉扩展名与空格，点号换成下划线
+        stem = Path(file_path).stem.replace(" ", "").replace(".", "_") or "audio"
 
-        if not need_upload and song_id:
-            # 云盘秒传
-            console.print("[green]云端已存在相同音频，触发秒传完成！[/green]")
-            return True
+        # Step 1: 上传检查。注意参数是扁平结构（早期的 songs 数组写法服务端会回 400 参数错误）
+        check_res = self.eapi_request("/api/cloud/upload/check", {
+            "bitrate": bitrate,
+            "ext": "",
+            "length": file_size,
+            "md5": md5_hex,
+            "songId": "0",
+            "version": 1,
+        })
+        if check_res.get("code") != 200:
+            reason = check_res.get("message") or check_res.get("msg") or "接口无响应或返回异常"
+            console.print(f"[red]云盘上传检查失败: {reason}[/red]")
+            return False
 
-        # Step 2: 申请 NOS 上传凭证（eapi）
-        token_data = {
-            "bucket": "jd-musicrep-privatecloud-audio-public",
+        need_upload = check_res.get("needUpload", True)
+        # songId 是「这个 md5 在云端的资源 id」，登记步骤必须原样带回
+        cloud_song_id = check_res.get("songId") or "0"
+
+        # Step 2: 申请 NOS 上传凭证
+        token_res = self.eapi_request("/api/nos/token/alloc", {
+            "bucket": "",
             "ext": ext,
-            "filename": os.path.basename(file_path),
+            "filename": stem,
             "local": False,
             "nos_product": 3,
             "type": "audio",
-            "md5": md5_hex
-        }
-        token_res = self.eapi_request("/api/nos/token/alloc", token_data)
-        result_info = token_res.get("result", {})
-        doc_id = result_info.get("docId")
-        token = result_info.get("token")
-        bucket = result_info.get("bucket", "jd-musicrep-privatecloud-audio-public")
-
-        if not token or not doc_id:
-            console.print("[red]获取 NOS 上传凭证失败[/red]")
-            return False
-
-        # Step 3: Direct binary upload to NOS
-        nos_url = f"https://interface.music.163.com/nos-upload/{bucket}/{doc_id}?offset=0&complete=true&version=1.0"
-        headers = {
-            "x-nos-token": token,
-            "Content-Type": "audio/mpeg" if ext == "mp3" else "audio/flac",
-            "Content-MD5": md5_hex
-        }
-        upload_resp = self.session.post(nos_url, data=content, headers=headers, timeout=60)
-        if upload_resp.status_code not in (200, 201):
-            console.print(f"[red]NOS 音频流上传失败 (HTTP {upload_resp.status_code})[/red]")
-            return False
-
-        # Step 4: 发布到用户云盘（eapi）
-        pub_data = {
             "md5": md5_hex,
-            "songid": "0",
-            "filename": os.path.basename(file_path),
-            "song": title,
-            "artist": artist,
-            "album": album,
-            "bitrate": "320000",
-            "resourceId": doc_id
-        }
-        pub_res = self.eapi_request("/api/upload/cloud/info/v2", pub_data)
+        })
+        result_info = token_res.get("result") or {}
+        token = result_info.get("token")
+        object_key = result_info.get("objectKey")
+        # resourceId 才是登记接口要的值；docId 在「云端已有同 md5」时会被填成 -1
+        resource_id = result_info.get("resourceId")
 
-        if pub_res.get("code") == 200:
-            console.print(f"[bold green]上传成功！已同步至网易云云盘: {title} - {artist}[/bold green]")
-            return True
-        else:
-            console.print(f"[red]云盘提交失败: {pub_res.get('message', '未知错误')}[/red]")
+        if not token or not object_key or resource_id is None:
+            reason = token_res.get("message") or token_res.get("msg") or "接口无响应或返回异常"
+            console.print(f"[red]获取 NOS 上传凭证失败: {reason}[/red]")
             return False
+
+        # Step 3: 云端没有同 md5 的音频时才需要推流；否则直接复用已有资源
+        if need_upload:
+            if not self._upload_stream_to_nos(object_key, token, md5_hex, content, ext):
+                return False
+            console.print("  [green]✓[/green] 音频流已上传至 NOS")
+        else:
+            console.print("  [dim]云端已存在相同音频，跳过二进制上传[/dim]")
+
+        # Step 4: 登记云盘资源元信息
+        info_res = self.eapi_request("/api/upload/cloud/info/v2", {
+            "md5": md5_hex,
+            "songid": str(cloud_song_id),
+            "filename": stem,
+            "song": _clean_cloud_field(title, stem),
+            "artist": _clean_cloud_field(artist, "未知艺术家"),
+            "album": _clean_cloud_field(album, DEFAULT_CLOUD_ALBUM),
+            "bitrate": bitrate,
+            "resourceId": resource_id,
+        })
+        if info_res.get("code") != 200:
+            reason = info_res.get("message") or info_res.get("msg") or "接口无响应或返回异常"
+            console.print(f"[red]云盘资源登记失败: {reason}[/red]")
+            return False
+
+        new_song_id = info_res.get("songId") or (
+            (info_res.get("privateCloud") or {}).get("simpleSong") or {}
+        ).get("id")
+        if not new_song_id:
+            console.print("[red]云盘资源登记失败: 接口未返回 songId[/red]")
+            return False
+
+        # Step 5: 发布到个人云盘（少了这一步，资源只登记不展示）
+        pub_res = self.eapi_request("/api/cloud/pub/v2", {"songid": str(new_song_id)})
+        if pub_res.get("code") != 200 and not pub_res.get("privateCloud"):
+            reason = pub_res.get("message") or pub_res.get("msg") or "接口无响应或返回异常"
+            console.print(f"[red]云盘发布失败: {reason}[/red]")
+            return False
+
+        console.print(f"[bold green]上传成功！已同步至网易云云盘: {title} - {artist}[/bold green]")
+        return True
 
 def login_qr() -> bool:
     client = NetEaseClient()
