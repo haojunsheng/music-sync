@@ -48,9 +48,11 @@ class FakeSource:
         return list(self.candidates)
 
 
-def _configure(monkeypatch, sources, *, allow_lossy=False, flac_only_priority=None, download_dir=None):
+def _configure(monkeypatch, sources, *, allow_lossy=None, flac_only_priority=None, download_dir=None):
     cfg = config_mod.load_config()
-    cfg.allow_lossy_fallback = allow_lossy
+    # allow_lossy 为 None 时沿用配置默认策略（默认允许 320k 兜底）
+    if allow_lossy is not None:
+        cfg.allow_lossy_fallback = allow_lossy
     cfg.sources = list(sources.keys())
     if flac_only_priority is not None:
         cfg.quality_priority = flac_only_priority
@@ -74,19 +76,109 @@ class TestFlacPolicy:
         assert "仅限 FLAC" in out
 
     def test_lossy_candidate_accepted_when_fallback_enabled(self, monkeypatch, capsys):
-        """回归：allow_lossy_fallback=True 必须真正放开有损兜底。"""
+        """回归：allow_lossy_fallback=True 时必须接受 320k 兜底。"""
         src = FakeSource([_cand("320k", "mp3")])
         _configure(monkeypatch, {"qq": src}, allow_lossy=True)
 
         ok = pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True)
         assert ok is True
-        out = capsys.readouterr().out
-        assert "成功命中" in out
+        assert "最终选用" in capsys.readouterr().out
 
     def test_flac_candidate_accepted_by_default(self, monkeypatch):
         src = FakeSource([_cand("flac", "flac")])
         _configure(monkeypatch, {"qq": src}, allow_lossy=False)
         assert pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True) is True
+
+
+class TestQualityPolicy:
+    """匹配策略：优先无损；无无损时接受 320k；低于 320k 一律拒绝。
+
+    且找到无损即停止，不需要把每个音源都试一遍。
+    """
+
+    def test_128k_is_rejected(self, monkeypatch, capsys):
+        src = FakeSource([_cand("128k", "mp3")])
+        _configure(monkeypatch, {"qq": src}, allow_lossy=True)
+        assert pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True) is False
+        assert "低于可接受档位" in capsys.readouterr().out
+
+    def test_192k_is_rejected(self, monkeypatch):
+        # B 站 / YouTube 常见 192k，同样属于"更低音质"
+        src = FakeSource([_cand("192k", "m4a")])
+        _configure(monkeypatch, {"qq": src}, allow_lossy=True)
+        assert pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True) is False
+
+    def test_96k_is_rejected(self, monkeypatch):
+        src = FakeSource([_cand("96k", "mp3")])
+        _configure(monkeypatch, {"qq": src}, allow_lossy=True)
+        assert pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True) is False
+
+    def test_320k_accepted_when_no_lossless(self, monkeypatch, capsys):
+        src = FakeSource([_cand("320k", "mp3")])
+        _configure(monkeypatch, {"qq": src}, allow_lossy=True)
+        assert pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True) is True
+        assert "320K" in capsys.readouterr().out.upper()
+
+    def test_lossless_stops_iteration_immediately(self, monkeypatch):
+        """找到无损即停止，不再检索后续音源。"""
+        first = FakeSource([_cand("flac", "flac", source="qq")])
+        second = FakeSource([_cand("flac", "flac", source="kugou")])
+        _configure(monkeypatch, {"qq": first, "kugou": second})
+        pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True)
+        assert first.searched is True
+        assert second.searched is False
+
+    def test_keeps_searching_for_lossless_after_lossy_hit(self, monkeypatch):
+        """先在某个源拿到 320k，仍要继续找无损，不能就此停手。"""
+        lossy = FakeSource([_cand("320k", "mp3", source="qq")])
+        lossless = FakeSource([_cand("flac", "flac", source="kugou")])
+        _configure(monkeypatch, {"qq": lossy, "kugou": lossless})
+        pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True)
+        assert lossy.searched is True
+        assert lossless.searched is True
+
+    def test_prefers_lossless_over_lossy_across_sources(self, monkeypatch, capsys):
+        lossy = FakeSource([_cand("320k", "mp3", source="qq", url="http://cdn/lossy.mp3")])
+        lossless = FakeSource([_cand("flac", "flac", source="kugou", url="http://cdn/lossless.flac")])
+        _configure(monkeypatch, {"qq": lossy, "kugou": lossless})
+        pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True)
+        # 最终应选中后到的无损，而不是先遇到的 320k
+        assert "http://cdn/lossless.flac" in capsys.readouterr().out
+
+    def test_lossy_fallback_kept_when_no_lossless_anywhere(self, monkeypatch, capsys):
+        a = FakeSource([_cand("320k", "mp3", source="qq", url="http://cdn/a.mp3")])
+        b = FakeSource([_cand("128k", "mp3", source="kugou", url="http://cdn/b.mp3")])
+        _configure(monkeypatch, {"qq": a, "kugou": b})
+        ok = pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True)
+        assert ok is True
+        # 320k 兜底被保留，128k 被丢弃
+        assert "http://cdn/a.mp3" in capsys.readouterr().out
+
+    def test_higher_quality_preferred_within_one_source(self, monkeypatch, capsys):
+        src = FakeSource(
+            [
+                _cand("320k", "mp3", url="http://cdn/low.mp3"),
+                _cand("flac", "flac", url="http://cdn/high.flac"),
+            ]
+        )
+        _configure(monkeypatch, {"qq": src}, allow_lossy=True)
+        pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True)
+        assert "http://cdn/high.flac" in capsys.readouterr().out
+
+    def test_ape_counts_as_lossless(self, monkeypatch):
+        src = FakeSource([_cand("ape", "ape", source="qq")])
+        other = FakeSource([_cand("320k", "mp3", source="kugou")])
+        _configure(monkeypatch, {"qq": src, "kugou": other})
+        pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True)
+        # ape 属于无损，命中后应停止检索
+        assert other.searched is False
+
+    def test_all_candidates_below_floor_returns_false(self, monkeypatch):
+        a = FakeSource([_cand("128k", "mp3", source="qq")])
+        b = FakeSource([_cand("96k", "mp3", source="kugou")])
+        _configure(monkeypatch, {"qq": a, "kugou": b})
+        # 两个源都只有低于 320k 的资源 -> 整体失败
+        assert pipeline.sync_single_track("断桥残雪", "许嵩", dry_run=True) is False
 
 
 class TestCandidateSelection:

@@ -19,6 +19,26 @@ from music_sync.sources.base import TrackCandidate
 
 console = Console()
 
+# 无损音质档位
+LOSSLESS_QUALITIES = frozenset({"flac", "ape"})
+
+def is_lossless(candidate: TrackCandidate) -> bool:
+    """判断候选是否为无损音质（quality 或扩展名任一命中）。"""
+    if (candidate.quality or "").lower() in LOSSLESS_QUALITIES:
+        return True
+    return (candidate.file_ext or "").lower() in LOSSLESS_QUALITIES
+
+def quality_rank(candidate: TrackCandidate, accepted: List[str]) -> Optional[int]:
+    """候选在可接受音质档位中的优先级位置（越小越好）；None 表示不可接受。"""
+    quality = (candidate.quality or "").lower()
+    if quality in accepted:
+        return accepted.index(quality)
+    # quality 未标注但扩展名是无损时，按 flac 档处理
+    ext = (candidate.file_ext or "").lower()
+    if ext in LOSSLESS_QUALITIES and "flac" in accepted:
+        return accepted.index("flac")
+    return None
+
 def download_file(url: str, output_path: str, extra_headers: dict = None) -> bool:
     session = get_session()
     try:
@@ -49,12 +69,16 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
 
     # M2: 遍历音源搜索
     console.print("[dim]M2: 遍历音源抓取...[/dim]")
-    selected_candidate: Optional[TrackCandidate] = None
 
-    # 仅当显式指定 flac_only、或用户未开启有损回退时，才强制只接受 FLAC。
-    # 旧实现里的 `or cfg.quality_priority == ["flac"]` 会让 allow_lossy_fallback 永远失效
-    # （默认 quality_priority 恒为 ["flac"]，导致该条件恒真）。
     only_flac = flac_only or not cfg.allow_lossy_fallback
+    accepted = list(cfg.quality_priority)
+    if only_flac:
+        accepted = [q for q in accepted if q in LOSSLESS_QUALITIES]
+    if not accepted:
+        accepted = [q for q in cfg.quality_priority if q in LOSSLESS_QUALITIES] or ["flac"]
+
+    selected_candidate: Optional[TrackCandidate] = None
+    selected_rank: Optional[int] = None
 
     for source_name in cfg.sources:
         if source_name not in SOURCE_REGISTRY:
@@ -63,36 +87,64 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
         try:
             source = get_source(source_name)
             candidates = source.search_and_resolve(target_title, target_artist, target_duration)
-            if candidates:
-                console.print(f"    [cyan][+] {source_name.upper()}: 找到 {len(candidates)} 个候选曲目:[/cyan]")
-                for c in candidates:
-                    console.print(f"      • {c.title} - {c.artist} | 格式: {c.file_ext} | 音质: {c.quality} | 时长: {c.duration_seconds}s")
-
-                valid_candidates = candidates
-                if only_flac:
-                    valid_candidates = [c for c in candidates if c.quality == "flac" or c.file_ext == "flac"]
-                    if not valid_candidates:
-                        console.print(f"      [yellow]↳ (该源未提供 FLAC 无损格式，已跳过)[/yellow]")
-                        continue
-
-                # 排序质量
-                quality_order = {q: i for i, q in enumerate(cfg.quality_priority)}
-                valid_candidates.sort(key=lambda c: quality_order.get(c.quality, 99))
-                selected_candidate = valid_candidates[0]
-                console.print(f"    [bold green]✓ 成功命中音源 [{selected_candidate.source.upper()}] 音质: {selected_candidate.quality.upper()}[/bold green]")
-                break
-            else:
-                console.print(f"    [dim]  [-] {source_name.upper()}: 未获得可用候选[/dim]")
         except Exception as e:
             console.print(f"    [dim]  [-] {source_name.upper()}: 请求异常 ({e})[/dim]")
             continue
+
+        if not candidates:
+            console.print(f"    [dim]  [-] {source_name.upper()}: 未获得可用候选[/dim]")
+            continue
+
+        console.print(f"    [cyan][+] {source_name.upper()}: 找到 {len(candidates)} 个候选曲目:[/cyan]")
+        for c in candidates:
+            console.print(f"      • {c.title} - {c.artist} | 格式: {c.file_ext} | 音质: {c.quality} | 时长: {c.duration_seconds}s")
+
+        # 只保留达到可接受音质档位的候选，更低音质直接丢弃
+        ranked = []
+        for c in candidates:
+            rank = quality_rank(c, accepted)
+            if rank is None:
+                continue
+            ranked.append((rank, c))
+
+        if not ranked:
+            console.print(
+                f"      [yellow]↳ (候选音质均低于可接受档位 {'/'.join(accepted).upper()}，已跳过)[/yellow]"
+            )
+            continue
+
+        ranked.sort(key=lambda item: item[0])
+        top_rank, top_candidate = ranked[0]
+
+        if selected_rank is None or top_rank < selected_rank:
+            selected_candidate, selected_rank = top_candidate, top_rank
+
+        # 已拿到无损：不必再检索其余音源，立即停止
+        if is_lossless(selected_candidate):
+            console.print(
+                f"    [bold green]✓ 命中无损音源 [{selected_candidate.source.upper()}] "
+                f"音质: {selected_candidate.quality.upper()}，停止检索其余音源[/bold green]"
+            )
+            break
+
+        console.print(
+            f"      [dim]↳ 暂存 [{top_candidate.source.upper()}] 音质: {top_candidate.quality.upper()}，"
+            f"继续寻找无损...[/dim]"
+        )
 
     if not selected_candidate:
         if only_flac:
             console.print(f"[bold red]❌ 未找到匹配的 FLAC 无损音源（已开启仅限 FLAC 无损模式）: {title} - {artist}[/bold red]")
         else:
-            console.print(f"[bold red]❌ 未找到匹配的可用音源: {title} - {artist}[/bold red]")
+            console.print(
+                f"[bold red]❌ 未找到匹配的可用音源（可接受音质: {'/'.join(accepted).upper()}）: {title} - {artist}[/bold red]"
+            )
         return False
+
+    console.print(
+        f"  [bold green]✓ 最终选用 [{selected_candidate.source.upper()}] "
+        f"音质: {selected_candidate.quality.upper()}[/bold green]"
+    )
 
     if dry_run:
         console.print(f"[yellow]⚡ [Dry-Run 模式] 命中候选: {selected_candidate.title} | 音源: {selected_candidate.source} | 格式: {selected_candidate.file_ext} | 下载地址: {selected_candidate.download_url}[/yellow]")

@@ -15,8 +15,8 @@ class TestDefaults:
         # 首次加载会落盘一份默认配置
         assert config_mod.DEFAULT_CONFIG_FILE.exists()
         assert cfg.tolerance_seconds == 10
-        assert cfg.quality_priority == ["flac"]
-        assert cfg.allow_lossy_fallback is False
+        assert cfg.quality_priority == ["flac", "ape", "320k"]
+        assert cfg.allow_lossy_fallback is True
         assert cfg.download_dir.endswith("music-sync")
 
     def test_default_sources_order_is_preserved(self):
@@ -89,7 +89,7 @@ class TestRobustness:
         config_mod.DEFAULT_CONFIG_FILE.write_text("{ this is not json", encoding="utf-8")
         cfg = config_mod.load_config()
         # 解析失败时回退到内置默认值，而不是崩溃
-        assert cfg.quality_priority == ["flac"]
+        assert cfg.quality_priority == ["flac", "ape", "320k"]
         assert cfg.tolerance_seconds == 10
 
     def test_partial_config_uses_defaults_for_missing_fields(self):

@@ -20,8 +20,10 @@ DEFAULT_BLACKLIST_KEYWORDS = [
 @dataclass
 class Config:
     tolerance_seconds: int = 10
-    quality_priority: List[str] = field(default_factory=lambda: ["flac"])
-    allow_lossy_fallback: bool = False
+    # 可接受音质档位，按优先级从高到低排列；未列入的档位一律拒绝。
+    # 默认策略：优先无损（flac/ape），没有无损时接受 320k，低于 320k 的一概不接受。
+    quality_priority: List[str] = field(default_factory=lambda: ["flac", "ape", "320k"])
+    allow_lossy_fallback: bool = True
     sources: List[str] = field(default_factory=lambda: ["qq", "migu", "kuwo", "netease", "kugou", "bilibili", "youtube", "1music"])
     qq_cookie: str = ""
     netease_cookie: str = ""

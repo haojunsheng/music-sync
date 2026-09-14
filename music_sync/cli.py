@@ -9,6 +9,9 @@ from music_sync.pipeline import sync_single_track, sync_batch_csv
 
 console = Console()
 
+def _as_bool(value: str) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes", "y", "on")
+
 def handle_login(args):
     console.print("[bold cyan]=== 网易云音乐二维码登录 ===[/bold cyan]")
     ok = login_qr()
@@ -24,7 +27,8 @@ def handle_sync(args):
         artist=args.artist,
         album=args.album or "",
         dry_run=args.dry_run,
-        no_upload=args.no_upload
+        no_upload=args.no_upload,
+        flac_only=getattr(args, "flac_only", False)
     )
 
 def handle_batch(args):
@@ -48,13 +52,22 @@ def handle_config(args):
         cfg.tolerance_seconds = args.tolerance_seconds
         changed = True
     if args.use_system_proxy is not None:
-        cfg.use_system_proxy = args.use_system_proxy.lower() in ("true", "1", "yes")
+        cfg.use_system_proxy = _as_bool(args.use_system_proxy)
         changed = True
     if args.bilibili_cookie is not None:
         cfg.bilibili_cookie = args.bilibili_cookie
         changed = True
     if args.token_1music is not None:
         cfg.token_1music = args.token_1music
+        changed = True
+    if args.quality_priority is not None:
+        # 形如 "flac,ape,320k"，按优先级从高到低；未列入的档位一律拒绝
+        cfg.quality_priority = [
+            q.strip().lower() for q in args.quality_priority.split(",") if q.strip()
+        ]
+        changed = True
+    if args.allow_lossy is not None:
+        cfg.allow_lossy_fallback = _as_bool(args.allow_lossy)
         changed = True
 
     if changed:
@@ -70,6 +83,7 @@ def handle_config(args):
     table.add_row("allow_lossy_fallback", str(cfg.allow_lossy_fallback))
     table.add_row("sources", str(cfg.sources))
     table.add_row("qq_cookie", f"{cfg.qq_cookie[:30]}..." if len(cfg.qq_cookie) > 30 else (cfg.qq_cookie or "(未配置)"))
+    table.add_row("netease_cookie", f"{cfg.netease_cookie[:30]}..." if len(cfg.netease_cookie) > 30 else (cfg.netease_cookie or "(未配置)"))
     table.add_row("use_system_proxy", str(cfg.use_system_proxy))
     table.add_row("1music_token", f"{cfg.token_1music[:15]}..." if len(cfg.token_1music) > 15 else (cfg.token_1music or "(未配置)"))
     table.add_row("download_dir", cfg.download_dir)
@@ -94,6 +108,7 @@ def main():
     sync_parser.add_argument("--album", default="", help="专辑名称（可选）")
     sync_parser.add_argument("--dry-run", action="store_true", help="只预览匹配结果，不下载与上传")
     sync_parser.add_argument("--no-upload", action="store_true", help="仅下载打标，不上传网易云云盘")
+    sync_parser.add_argument("--flac-only", action="store_true", help="强制只接受无损音源")
 
     # batch
     batch_parser = subparsers.add_parser("batch", help="批量同步 CSV 文件中的歌曲")
@@ -104,10 +119,16 @@ def main():
     # config
     config_parser = subparsers.add_parser("config", help="查看或修改配置")
     config_parser.add_argument("--qq-cookie", help="设置 QQ 音乐会员 Cookie")
+    config_parser.add_argument("--netease-cookie", help="设置网易云登录 Cookie")
     config_parser.add_argument("--tolerance-seconds", type=int, help="设置时长容差（秒）")
     config_parser.add_argument("--use-system-proxy", help="是否走系统代理 (true/false)")
     config_parser.add_argument("--bilibili-cookie", help="设置 B站 Cookie")
     config_parser.add_argument("--1music-token", dest="token_1music", help="设置 1music.cc 令牌")
+    config_parser.add_argument(
+        "--quality-priority",
+        help="可接受音质档位，按优先级从高到低用逗号分隔，例如 flac,ape,320k"
+    )
+    config_parser.add_argument("--allow-lossy", help="是否允许 320k 等有损兜底 (true/false)")
 
     args = parser.parse_args()
 
