@@ -215,7 +215,10 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
         return True
 
     upload_ok = ne_client.upload_to_cloud(output_path, target_title, target_artist, target_album)
-    return upload_ok
+    if not upload_ok:
+        # 本地下载与打标已就绪，云盘同步失败不应把整个任务判定为失败
+        console.print(f"[yellow]⚠️ 云盘同步未完成，但本地文件已就绪: {output_path}[/yellow]")
+    return True
 
 def sync_batch_csv(csv_path: str, dry_run: bool = False, no_upload: bool = False):
     if not os.path.exists(csv_path):

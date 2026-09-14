@@ -344,3 +344,35 @@ class TestBatchSync:
         monkeypatch.setattr(pipeline, "sync_single_track", fake_sync)
         # 单条异常不应中断批量任务
         pipeline.sync_batch_csv(str(csv_file))
+
+
+class TestCloudUploadFailure:
+    def test_local_success_still_counts_as_success(self, monkeypatch, tmp_path, capsys):
+        """云盘同步失败不应把整个任务判失败——本地文件其实已经就绪。"""
+        from pathlib import Path
+
+        src = FakeSource([_cand("flac", "flac", url="http://cdn/x.flac")])
+        _configure(monkeypatch, {"qq": src}, download_dir=tmp_path)
+
+        def fake_download(url, output_path, extra_headers=None):
+            p = Path(output_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"FAKE")
+            return True
+
+        class FailingNetEase:
+            def check_cloud_song_exists(self, title, artist):
+                return False
+
+            def upload_to_cloud(self, file_path, title, artist, album):
+                return False
+
+        monkeypatch.setattr(pipeline, "download_file", fake_download)
+        monkeypatch.setattr(pipeline, "NetEaseClient", FailingNetEase)
+        monkeypatch.setattr(pipeline, "validate_audio_file", lambda p, d, tol: (True, 227.0, "OK"))
+        monkeypatch.setattr(pipeline, "get_lyrics", lambda *a, **k: ("", False))
+        monkeypatch.setattr(pipeline, "apply_tags_and_verify", lambda *a, **k: (True, "ok"))
+
+        ok = pipeline.sync_single_track("断桥残雪", "许嵩")
+        assert ok is True
+        assert "本地文件已就绪" in capsys.readouterr().out

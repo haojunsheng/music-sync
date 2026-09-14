@@ -158,3 +158,51 @@ class TestQrLogin:
         client = _client(monkeypatch, stub)
         assert client.get_login_qr_key() is None
         assert client.login_with_qrcode(timeout_sec=0) is False
+
+
+class TestEapiRequest:
+    """eapi 是现行通道；weapi 已被服务端下线（返回 200 + 空 body）。"""
+
+    def test_returns_parsed_json(self, monkeypatch, stub_session, fake_response):
+        stub = stub_session({"interface.music.163.com": fake_response(200, json_data={"code": 200})})
+        client = _client(monkeypatch, stub)
+        assert client.eapi_request("/api/nos/token/alloc", {"a": 1}) == {"code": 200}
+
+    def test_empty_body_returns_empty_dict(self, monkeypatch, stub_session, fake_response):
+        stub = stub_session({"interface.music.163.com": fake_response(200, text="")})
+        client = _client(monkeypatch, stub)
+        assert client.eapi_request("/api/x", {"a": 1}) == {}
+
+    def test_exception_returns_empty_dict(self, monkeypatch, stub_session):
+        class Boom:
+            def post(self, *a, **k):
+                raise RuntimeError("down")
+
+            def get(self, *a, **k):
+                raise RuntimeError("down")
+
+        client = _client(monkeypatch, Boom())
+        assert client.eapi_request("/api/x", {"a": 1}) == {}
+
+    def test_cookie_header_is_populated_from_config(self, monkeypatch, stub_session, fake_response):
+        _login_config()
+        stub = stub_session({"interface.music.163.com": fake_response(200, json_data={"code": 200})})
+        client = _client(monkeypatch, stub)
+        assert "MUSIC_U=token123" in client._cookie_header()
+
+
+class TestUploadToCloudRobustness:
+    def test_null_data_does_not_crash(self, monkeypatch, stub_session, fake_response, tmp_path, capsys):
+        """回归：接口异常时 data 为 null，旧写法 check_res['data'][0] 会抛 TypeError。"""
+        _login_config()
+        stub = stub_session(
+            {
+                CLOUD_URL_KEY: fake_response(200, json_data={"code": 200, "data": []}),
+                "interface.music.163.com": fake_response(200, json_data={"code": 400, "data": None}),
+            }
+        )
+        client = _client(monkeypatch, stub)
+        f = tmp_path / "a.mp3"
+        f.write_bytes(b"x")
+        assert client.upload_to_cloud(str(f), "t", "a", "al") is False
+        assert "凭证" in capsys.readouterr().out

@@ -44,17 +44,45 @@ class TestFetchQqLyrics:
 
 
 class TestFetchNeteaseLyrics:
-    def test_fetches_lyric_via_weapi(self, stub_session, patch_session, fake_response):
+    def test_fetches_lyric_via_eapi(self, stub_session, patch_session, fake_response):
         search = {"result": {"songs": [{"id": 123}]}}
         lrc = {"lrc": {"lyric": "[00:01.00]hello"}}
         stub = stub_session(
             {
                 "music.163.com/api/search/get/web": fake_response(200, json_data=search),
-                "weapi/crypto/song/lyric": fake_response(200, json_data=lrc),
+                "interface.music.163.com": fake_response(200, json_data=lrc),
             }
         )
         patch_session("music_sync.lyrics.get_session", stub)
         assert lyrics.fetch_netease_lyrics("断桥残雪", "许嵩") == "[00:01.00]hello"
+
+    def test_uses_non_v1_lyric_path(self, stub_session, patch_session, fake_response):
+        """回归：/api/song/lyric/v1 返回的是逐字歌词 JSON，必须用不带 /v1 的路径。"""
+        search = {"result": {"songs": [{"id": 123}]}}
+        lrc = {"lrc": {"lyric": "[00:00.000] 作词 : 许嵩"}}
+        stub = stub_session(
+            {
+                "music.163.com/api/search/get/web": fake_response(200, json_data=search),
+                "interface.music.163.com": fake_response(200, json_data=lrc),
+            }
+        )
+        patch_session("music_sync.lyrics.get_session", stub)
+        lyrics.fetch_netease_lyrics("断桥残雪", "许嵩")
+        urls = [c[1] for c in stub.calls]
+        assert any(u.endswith("/api/song/lyric") for u in urls)
+        assert not any("/api/song/lyric/v1" in u for u in urls)
+
+    def test_eapi_empty_body_returns_none(self, stub_session, patch_session, fake_response):
+        """回归：weapi 通道会返回 200 + 空 body，此时应返回 None 而不是崩溃。"""
+        search = {"result": {"songs": [{"id": 123}]}}
+        stub = stub_session(
+            {
+                "music.163.com/api/search/get/web": fake_response(200, json_data=search),
+                "interface.music.163.com": fake_response(200, text=""),
+            }
+        )
+        patch_session("music_sync.lyrics.get_session", stub)
+        assert lyrics.fetch_netease_lyrics("断桥残雪", "许嵩") is None
 
     def test_no_search_result_returns_none(self, stub_session, patch_session, fake_response):
         stub = stub_session(

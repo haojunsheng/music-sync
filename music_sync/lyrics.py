@@ -1,8 +1,16 @@
 import re
 import base64
 from typing import Optional, Tuple
+
+from music_sync.config import load_config
 from music_sync.http import get_session
-from music_sync.netease_crypto import weapi_encrypt
+from music_sync.netease_crypto import eapi_encrypt
+
+EAPI_HOST = "https://interface.music.163.com/eapi"
+# 注意：必须用不带 /v1 的路径。/api/song/lyric/v1 返回的是逐字歌词 JSON
+# （形如 {"t":0,"c":[{"tx":"..."}]} 每行一个对象），不是标准 LRC 时间轴。
+NETEASE_LYRIC_PATH = "/api/song/lyric"
+
 
 def parse_last_lyric_timestamp(lrc_text: str) -> float:
     matches = re.findall(r'\[(\d{2}):(\d{2}(?:\.\d+)?)\]', lrc_text)
@@ -32,8 +40,15 @@ def fetch_qq_lyrics(songmid: str) -> Optional[str]:
     return None
 
 def fetch_netease_lyrics(title: str, artist: str) -> Optional[str]:
+    """经 eapi 获取网易云歌词。
+
+    旧实现走 weapi/crypto/song/lyric，该通道已下线（返回 200 + 空 body），
+    表现为「歌词: 无」。现改为 eapi，并携带登录态 Cookie。
+    """
     session = get_session()
-    # First search song ID
+    cookie = load_config().netease_cookie or ""
+
+    # 1) 先按歌名/歌手搜出 song id
     search_url = "https://music.163.com/api/search/get/web"
     params = {"s": f"{title} {artist}", "type": 1, "limit": 1}
     try:
@@ -44,12 +59,18 @@ def fetch_netease_lyrics(title: str, artist: str) -> Optional[str]:
         if not songs:
             return None
         song_id = songs[0].get("id")
+    except Exception:
+        return None
 
-        # Fetch lyric with weapi
-        lrc_url = "https://music.163.com/weapi/crypto/song/lyric"
-        encrypted = weapi_encrypt({"id": song_id, "lv": -1, "tv": -1, "rv": -1})
-        headers = {"Referer": "https://music.163.com"}
-        lrc_resp = session.post(lrc_url, data=encrypted, headers=headers, timeout=8)
+    # 2) eapi 取歌词
+    try:
+        encrypted = eapi_encrypt(NETEASE_LYRIC_PATH, {"id": song_id, "lv": -1, "tv": -1})
+        lrc_resp = session.post(
+            EAPI_HOST + NETEASE_LYRIC_PATH,
+            data={"params": encrypted},
+            headers={"Referer": "https://music.163.com", "Cookie": cookie},
+            timeout=8,
+        )
         if lrc_resp.status_code == 200:
             return lrc_resp.json().get("lrc", {}).get("lyric", "")
     except Exception:

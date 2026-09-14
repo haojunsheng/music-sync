@@ -7,8 +7,8 @@ import qrcode
 from rich.console import Console
 
 from music_sync.config import DEFAULT_COOKIE_FILE, load_config
-from music_sync.http import get_session
-from music_sync.netease_crypto import weapi_encrypt
+from music_sync.http import DEFAULT_USER_AGENT, get_session
+from music_sync.netease_crypto import eapi_encrypt, weapi_encrypt
 
 console = Console()
 
@@ -63,6 +63,33 @@ class NetEaseClient:
         }
         try:
             resp = self.session.post(url, data=encrypted, headers=headers, timeout=15)
+            if resp.status_code == 200 and resp.text:
+                return resp.json()
+        except Exception:
+            pass
+        return {}
+
+    def _cookie_header(self) -> str:
+        return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+
+    def eapi_request(self, path: str, data: dict) -> dict:
+        """eapi 通道请求。weapi 已被服务端下线（返回 200 + 空 body）。
+
+        path 形如 /api/cloud/upload/check；任何异常一律返回 {}。
+        """
+        try:
+            resp = self.session.post(
+                "https://interface.music.163.com/eapi" + path,
+                data={"params": eapi_encrypt(path, data)},
+                headers={
+                    "Referer": "https://music.163.com",
+                    "Origin": "https://music.163.com",
+                    "User-Agent": DEFAULT_USER_AGENT,
+                    "Cookie": self._cookie_header(),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout=15,
+            )
             if resp.status_code == 200 and resp.text:
                 return resp.json()
         except Exception:
@@ -213,8 +240,7 @@ class NetEaseClient:
             content = f.read()
         md5_hex = hashlib.md5(content).hexdigest()
 
-        # Step 1: Upload check
-        check_url = "https://music.163.com/weapi/cloud/upload/check"
+        # Step 1: 上传检查（eapi；weapi 已下线，返回 200 + 空 body）
         check_data = {
             "uploadType": 0,
             "songs": json.dumps([{
@@ -228,17 +254,18 @@ class NetEaseClient:
                 "ext": ext
             }])
         }
-        check_res = self.weapi_request(check_url, check_data)
-        need_upload = check_res.get("data", [{}])[0].get("needUpload", True)
-        song_id = check_res.get("data", [{}])[0].get("songId", "")
+        check_res = self.eapi_request("/api/cloud/upload/check", check_data)
+        # 接口异常时 data 可能为 null，直接取 [0] 会抛 TypeError
+        check_items = check_res.get("data") or [{}]
+        need_upload = check_items[0].get("needUpload", True)
+        song_id = check_items[0].get("songId", "")
 
         if not need_upload and song_id:
             # 云盘秒传
             console.print("[green]云端已存在相同音频，触发秒传完成！[/green]")
             return True
 
-        # Step 2: Request NOS upload token
-        token_url = "https://music.163.com/weapi/nos/token/alloc"
+        # Step 2: 申请 NOS 上传凭证（eapi）
         token_data = {
             "bucket": "jd-musicrep-privatecloud-audio-public",
             "ext": ext,
@@ -248,7 +275,7 @@ class NetEaseClient:
             "type": "audio",
             "md5": md5_hex
         }
-        token_res = self.weapi_request(token_url, token_data)
+        token_res = self.eapi_request("/api/nos/token/alloc", token_data)
         result_info = token_res.get("result", {})
         doc_id = result_info.get("docId")
         token = result_info.get("token")
@@ -270,8 +297,7 @@ class NetEaseClient:
             console.print(f"[red]NOS 音频流上传失败 (HTTP {upload_resp.status_code})[/red]")
             return False
 
-        # Step 4: Import / Publish to User Cloud
-        pub_url = "https://music.163.com/weapi/upload/cloud/info/v2"
+        # Step 4: 发布到用户云盘（eapi）
         pub_data = {
             "md5": md5_hex,
             "songid": "0",
@@ -282,7 +308,7 @@ class NetEaseClient:
             "bitrate": "320000",
             "resourceId": doc_id
         }
-        pub_res = self.weapi_request(pub_url, pub_data)
+        pub_res = self.eapi_request("/api/upload/cloud/info/v2", pub_data)
 
         if pub_res.get("code") == 200:
             console.print(f"[bold green]上传成功！已同步至网易云云盘: {title} - {artist}[/bold green]")
