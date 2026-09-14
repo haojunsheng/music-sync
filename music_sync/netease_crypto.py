@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 from Crypto.Cipher import AES
@@ -13,6 +14,10 @@ MODULUS = (
 NONCE = "0CoJUm6Qyw8W8jud"
 PUBKEY = "010001"
 LINUX_API_KEY = "rFgSplit!#@#@"
+
+# eapi（现行接口）固定密钥与分隔符；weapi 已废弃但保留以供兼容
+EAPI_KEY = "e82ckenh8dichen8"
+EAPI_SEP = "-36cd479b6b5-"
 
 def _aes_encrypt(text: str, key: str) -> str:
     pad = 16 - len(text.encode("utf-8")) % 16
@@ -35,3 +40,18 @@ def weapi_encrypt(data: dict) -> dict:
         "params": params,
         "encSecKey": enc_sec_key
     }
+
+def eapi_encrypt(url_path: str, payload: dict) -> str:
+    """网易云 eapi 参数加密，返回可直接作为 params 提交的大写 hex 字符串。
+
+    明文约定为 `nobody{path}use{json}md5forencrypt`；随后把 path、json 与
+    该明文的 md5 用分隔符拼起来，整体做 AES-128-ECB（PKCS7 填充）。
+    weapi 通道已被服务端下线（返回 200 + 空 body），因此改用 eapi。
+    """
+    text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.md5(f"nobody{url_path}use{text}md5forencrypt".encode("utf-8")).hexdigest()
+    raw = f"{url_path}{EAPI_SEP}{text}{EAPI_SEP}{digest}"
+    pad = 16 - len(raw.encode("utf-8")) % 16
+    raw += chr(pad) * pad
+    cipher = AES.new(EAPI_KEY.encode("utf-8"), AES.MODE_ECB)
+    return cipher.encrypt(raw.encode("utf-8")).hex().upper()

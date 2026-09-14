@@ -72,3 +72,58 @@ class TestRsaEncrypt:
         a = netease_crypto._rsa_encrypt("0123456789abcdef", netease_crypto.PUBKEY, netease_crypto.MODULUS)
         b = netease_crypto._rsa_encrypt("0123456789abcdef", netease_crypto.PUBKEY, netease_crypto.MODULUS)
         assert a == b
+
+
+class TestEapiEncrypt:
+    """eapi 是现行可用的直链接口通道（weapi 已废弃返回空 body）。"""
+
+    PLAYER_PATH = "/api/song/enhance/player/url/v1"
+
+    def test_returns_uppercase_hex(self):
+        out = netease_crypto.eapi_encrypt(self.PLAYER_PATH, {"ids": "[1]", "level": "lossless"})
+        assert out == out.upper()
+        int(out, 16)
+
+    def test_output_is_block_aligned(self):
+        out = netease_crypto.eapi_encrypt("/api/x", {"a": 1})
+        # hex 长度 = 字节数 × 2，且字节数必须是 AES 块大小的整数倍
+        assert len(out) % 32 == 0
+
+    def test_is_deterministic(self):
+        # eapi 用固定密钥、无随机 IV，同样输入必须得到同样密文
+        payload = {"ids": "[1]", "level": "exhigh", "encodeType": "mp3"}
+        assert netease_crypto.eapi_encrypt(self.PLAYER_PATH, payload) == netease_crypto.eapi_encrypt(
+            self.PLAYER_PATH, payload
+        )
+
+    def test_plaintext_structure_and_digest(self):
+        import binascii
+        import hashlib
+
+        payload = {"ids": "[1]", "level": "lossless", "encodeType": "flac"}
+        out = netease_crypto.eapi_encrypt(self.PLAYER_PATH, payload)
+
+        cipher = AES.new(netease_crypto.EAPI_KEY.encode("utf-8"), AES.MODE_ECB)
+        raw = cipher.decrypt(binascii.unhexlify(out))
+        raw = raw[:-raw[-1]].decode("utf-8")  # 去掉 PKCS7 填充
+
+        parts = raw.split(netease_crypto.EAPI_SEP)
+        assert len(parts) == 3
+        assert parts[0] == self.PLAYER_PATH
+        assert parts[1] == '{"ids":"[1]","level":"lossless","encodeType":"flac"}'
+        expected = hashlib.md5(
+            f"nobody{self.PLAYER_PATH}use{parts[1]}md5forencrypt".encode("utf-8")
+        ).hexdigest()
+        assert parts[2] == expected
+
+    def test_chinese_payload_is_not_escaped(self):
+        import binascii
+
+        payload = {"song": "断桥残雪", "artist": "许嵩"}
+        out = netease_crypto.eapi_encrypt("/api/cloud/upload/check", payload)
+
+        cipher = AES.new(netease_crypto.EAPI_KEY.encode("utf-8"), AES.MODE_ECB)
+        raw = cipher.decrypt(binascii.unhexlify(out))
+        raw = raw[:-raw[-1]].decode("utf-8")
+        assert "断桥残雪" in raw
+        assert "\\u65ad" not in raw  # 不应被转义成 \uXXXX

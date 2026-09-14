@@ -139,6 +139,11 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
             console.print(
                 f"[bold red]❌ 未找到匹配的可用音源（可接受音质: {'/'.join(accepted).upper()}）: {title} - {artist}[/bold red]"
             )
+        console.print(
+            "[yellow]💡 若该曲目属于 VIP / 版权曲库，未登录时任何音源都不会返回直链。可尝试配置凭证后重试：[/yellow]"
+        )
+        console.print('[dim]   music-sync config --qq-cookie "<QQ音乐会员 Cookie>"   # 启用 QQ 音乐无损[/dim]')
+        console.print('[dim]   music-sync login                                    # 扫码登录网易云[/dim]')
         return False
 
     console.print(
