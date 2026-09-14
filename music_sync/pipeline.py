@@ -37,6 +37,18 @@ def sanitize_path_component(name: str, fallback: str = "Unknown") -> str:
         cleaned = cleaned.encode("utf-8")[:150].decode("utf-8", errors="ignore").strip(" .")
     return cleaned or fallback
 
+# 合作曲目的歌手分隔符（与 validator.is_artist_match 保持一致）
+_ARTIST_SEPARATORS = re.compile(r"[/、&]")
+
+def primary_artist(artist: str) -> str:
+    """取合作曲目中的首位歌手，仅用于归档目录。
+
+    例："许嵩/何曼婷" -> "许嵩"；"许嵩、Kent王健" -> "许嵩"。
+    写入文件的 ARTIST 标签仍保留完整歌手串，不会丢信息。
+    """
+    parts = _ARTIST_SEPARATORS.split(artist or "")
+    return next((p.strip() for p in parts if p.strip()), "")
+
 # 无损音质档位
 LOSSLESS_QUALITIES = frozenset({"flac", "ape"})
 
@@ -175,7 +187,8 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
 
     # M4: 下载音频，按「歌手 / 歌曲名」组织目录
     dl_dir = Path(os.path.expanduser(cfg.download_dir))
-    track_dir = dl_dir / sanitize_path_component(target_artist, "未知歌手")
+    # 目录按首位歌手归档（合作曲目统一收到主歌手目录下）
+    track_dir = dl_dir / sanitize_path_component(primary_artist(target_artist), "未知歌手")
     track_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{sanitize_path_component(target_title, '未知曲目')}.{selected_candidate.file_ext}"
     output_path = str(track_dir / filename)

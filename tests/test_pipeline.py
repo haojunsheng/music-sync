@@ -378,6 +378,30 @@ class TestCloudUploadFailure:
         assert "本地文件已就绪" in capsys.readouterr().out
 
 
+class TestPrimaryArtist:
+    def test_slash_separator(self):
+        assert pipeline.primary_artist("许嵩/何曼婷") == "许嵩"
+
+    def test_ampersand_separator(self):
+        assert pipeline.primary_artist("许嵩&Kent王健") == "许嵩"
+
+    def test_chinese_enumeration_separator(self):
+        assert pipeline.primary_artist("许嵩、谭维维") == "许嵩"
+
+    def test_single_artist_unchanged(self):
+        assert pipeline.primary_artist("许嵩") == "许嵩"
+
+    def test_empty_or_none(self):
+        assert pipeline.primary_artist("") == ""
+        assert pipeline.primary_artist(None) == ""
+
+    def test_leading_separator_is_skipped(self):
+        assert pipeline.primary_artist("/许嵩") == "许嵩"
+
+    def test_whitespace_is_stripped(self):
+        assert pipeline.primary_artist(" 许嵩 / 何曼婷 ") == "许嵩"
+
+
 class TestSanitizePathComponent:
     def test_replaces_illegal_chars(self):
         assert pipeline.sanitize_path_component('a/b\\c:d*e?f"g<h>i|j') == "a_b_c_d_e_f_g_h_i_j"
@@ -443,10 +467,48 @@ class TestOutputPathLayout:
         _run_full_sync(monkeypatch, tmp_path)
         assert (tmp_path / "许嵩").is_dir()
 
-    def test_slash_in_artist_is_sanitized(self, monkeypatch, tmp_path):
-        # 合唱曲目的 artist 形如 "许嵩/何曼婷"，不能产生多级目录
+    def test_collaboration_uses_primary_artist(self, monkeypatch, tmp_path):
+        # 合唱曲目按首位歌手归档："许嵩/何曼婷" -> 许嵩/
         path = _run_full_sync(monkeypatch, tmp_path, artist="许嵩/何曼婷")
-        assert path == str(tmp_path / "许嵩_何曼婷" / "断桥残雪.flac")
+        assert path == str(tmp_path / "许嵩" / "断桥残雪.flac")
+
+    def test_ampersand_separator_also_detected(self, monkeypatch, tmp_path):
+        path = _run_full_sync(monkeypatch, tmp_path, artist="许嵩&Kent王健")
+        assert path == str(tmp_path / "许嵩" / "断桥残雪.flac")
+
+    def test_chinese_enumeration_separator_also_detected(self, monkeypatch, tmp_path):
+        path = _run_full_sync(monkeypatch, tmp_path, artist="许嵩、谭维维")
+        assert path == str(tmp_path / "许嵩" / "断桥残雪.flac")
+
+    def test_artist_tag_keeps_full_collaboration(self, monkeypatch, tmp_path):
+        """目录取首位歌手，但写入文件的 ARTIST 标签必须保留完整歌手串。"""
+        from pathlib import Path
+
+        captured = {}
+
+        def fake_download(url, output_path, extra_headers=None):
+            p = Path(output_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"FAKE")
+            return True
+
+        def fake_tags(file_path, title, artist, album, lyrics="", cover_url=""):
+            captured["artist"] = artist
+            return True, "ok"
+
+        src = FakeSource([_cand("flac", "flac")])
+        _configure(monkeypatch, {"qq": src}, download_dir=tmp_path)
+        monkeypatch.setattr(
+            pipeline, "get_official_metadata",
+            lambda t, a: OfficialMetadata("素颜", "许嵩/何曼婷", "素颜", 238, source="QQMusic"),
+        )
+        monkeypatch.setattr(pipeline, "download_file", fake_download)
+        monkeypatch.setattr(pipeline, "validate_audio_file", lambda p, d, tol: (True, 238.0, "OK"))
+        monkeypatch.setattr(pipeline, "get_lyrics", lambda *a, **k: ("", False))
+        monkeypatch.setattr(pipeline, "apply_tags_and_verify", fake_tags)
+
+        pipeline.sync_single_track("素颜", "许嵩/何曼婷", no_upload=True)
+        assert captured["artist"] == "许嵩/何曼婷"
 
     def test_slash_in_title_is_sanitized(self, monkeypatch, tmp_path):
         path = _run_full_sync(monkeypatch, tmp_path, title="A/B")

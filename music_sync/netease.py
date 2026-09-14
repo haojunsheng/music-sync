@@ -41,6 +41,21 @@ def _encode_object_key(object_key: str) -> str:
 def _cloud_bitrate(ext: str) -> str:
     return CLOUD_LOSSLESS_BITRATE if ext in CLOUD_LOSSLESS_EXT else CLOUD_LOSSY_BITRATE
 
+
+def _describe_api_error(res: Dict[str, Any]) -> str:
+    """把网易云的失败响应翻译成可读原因。
+
+    网易云不少失败响应只有 code 没有 message（例如 info/v2 的 400），
+    直接取 message 会退化成「未知错误」，排查时毫无信息量。
+    """
+    if not res:
+        return "接口无响应（网络异常或 Cookie 已失效）"
+    for key in ("message", "msg", "error"):
+        if res.get(key):
+            return str(res[key])
+    code = res.get("code")
+    return f"接口返回 code={code}，无附加信息" if code is not None else "接口返回内容无法解析"
+
 class NetEaseClient:
     def __init__(self):
         self.session = get_session()
@@ -243,8 +258,9 @@ class NetEaseClient:
         artist_lower = artist.lower()
         for item in songs:
             pc = item.get("privateCloud", item)
-            s_name = pc.get("songName", pc.get("song", "")).lower()
-            a_name = pc.get("artist", "").lower()
+            # 真实响应里歌名字段叫 song（songName/fileName 是历史或其它端写入口径）
+            s_name = (pc.get("songName") or pc.get("song") or pc.get("fileName") or "").lower()
+            a_name = (pc.get("artist") or "").lower()
             if title_lower in s_name and (not artist_lower or artist_lower in a_name):
                 return True
         return False
@@ -332,8 +348,7 @@ class NetEaseClient:
             "version": 1,
         })
         if check_res.get("code") != 200:
-            reason = check_res.get("message") or check_res.get("msg") or "接口无响应或返回异常"
-            console.print(f"[red]云盘上传检查失败: {reason}[/red]")
+            console.print(f"[red]云盘上传检查失败: {_describe_api_error(check_res)}[/red]")
             return False
 
         need_upload = check_res.get("needUpload", True)
@@ -357,8 +372,7 @@ class NetEaseClient:
         resource_id = result_info.get("resourceId")
 
         if not token or not object_key or resource_id is None:
-            reason = token_res.get("message") or token_res.get("msg") or "接口无响应或返回异常"
-            console.print(f"[red]获取 NOS 上传凭证失败: {reason}[/red]")
+            console.print(f"[red]获取 NOS 上传凭证失败: {_describe_api_error(token_res)}[/red]")
             return False
 
         # Step 3: 云端没有同 md5 的音频时才需要推流；否则直接复用已有资源
@@ -381,8 +395,7 @@ class NetEaseClient:
             "resourceId": resource_id,
         })
         if info_res.get("code") != 200:
-            reason = info_res.get("message") or info_res.get("msg") or "接口无响应或返回异常"
-            console.print(f"[red]云盘资源登记失败: {reason}[/red]")
+            console.print(f"[red]云盘资源登记失败: {_describe_api_error(info_res)}[/red]")
             return False
 
         new_song_id = info_res.get("songId") or (
@@ -395,8 +408,7 @@ class NetEaseClient:
         # Step 5: 发布到个人云盘（少了这一步，资源只登记不展示）
         pub_res = self.eapi_request("/api/cloud/pub/v2", {"songid": str(new_song_id)})
         if pub_res.get("code") != 200 and not pub_res.get("privateCloud"):
-            reason = pub_res.get("message") or pub_res.get("msg") or "接口无响应或返回异常"
-            console.print(f"[red]云盘发布失败: {reason}[/red]")
+            console.print(f"[red]云盘发布失败: {_describe_api_error(pub_res)}[/red]")
             return False
 
         console.print(f"[bold green]上传成功！已同步至网易云云盘: {title} - {artist}[/bold green]")
