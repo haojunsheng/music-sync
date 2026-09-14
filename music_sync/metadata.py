@@ -1,8 +1,13 @@
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional, List
 from music_sync.http import get_session
-from music_sync.validator import validate_candidate_match
+from music_sync.validator import check_blacklist, validate_candidate_match
+
+# QQ 音乐专辑封面 CDN 模板（albummid 由搜索接口返回）
+QQ_ALBUM_COVER_TMPL = "https://y.gtimg.cn/music/photo_new/T002R300x300M000{albummid}.jpg"
+
 
 @dataclass
 class OfficialMetadata:
@@ -13,6 +18,72 @@ class OfficialMetadata:
     cover_url: str = ""
     release_year: str = ""
     source: str = ""
+
+
+def _norm_text(value: str) -> str:
+    """归一化文本用于精确比对：忽略大小写与空格。"""
+    return (value or "").lower().replace(" ", "")
+
+
+def fetch_qq_metadata(title: str, artist: str) -> Optional[OfficialMetadata]:
+    """从 QQ 音乐搜索接口取基准元数据（首选基准源）。
+
+    选它作为首选的依据：中文曲库覆盖最全，songname/singer/albumname/interval
+    直接对应官方发行信息，且能拿到 albummid 与 pubtime 用于封面和发行年份。
+
+    注意必须做匹配校验：这是模糊搜索，结果里会混入 Live/翻唱/伴奏等版本。
+    """
+    session = get_session()
+    query = f"{title} {artist}".strip()
+    url = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
+    params = {"p": 1, "n": 10, "w": query, "format": "json", "t": 0, "cr": 1}
+    headers = {"Referer": "https://y.qq.com/"}
+
+    try:
+        resp = session.get(url, params=params, headers=headers, timeout=8)
+        if resp.status_code != 200:
+            return None
+        songs = resp.json().get("data", {}).get("song", {}).get("list", [])
+    except Exception:
+        return None
+
+    fallback: Optional[OfficialMetadata] = None
+    for song in songs:
+        song_name = song.get("songname", "")
+        singers = song.get("singer", [])
+        singer_name = "/".join(s.get("name", "") for s in singers)
+        interval = song.get("interval", 0)
+
+        if not song_name or not interval or interval <= 0:
+            continue
+        # 歌名/歌手必须匹配，否则模糊搜索的首条可能是无关曲目
+        if not validate_candidate_match(song_name, singer_name, title, artist):
+            continue
+        # 排除 Live / DJ / 伴奏 / 翻唱等版本，避免用非原版时长锚定整条流水线
+        is_blacklisted, _ = check_blacklist(f"{song_name} {song.get('albumname', '')}")
+        if is_blacklisted:
+            continue
+
+        album_mid = song.get("albummid", "")
+        pubtime = song.get("pubtime", 0)
+        meta = OfficialMetadata(
+            title=song_name,
+            artist=singer_name or artist,
+            album=song.get("albumname", ""),
+            duration_seconds=int(interval),
+            cover_url=QQ_ALBUM_COVER_TMPL.format(albummid=album_mid) if album_mid else "",
+            release_year=str(datetime.fromtimestamp(pubtime, tz=timezone.utc).year) if pubtime else "",
+            source="QQMusic",
+        )
+
+        # 歌名完全一致者优先，避免 "断桥残雪 (Live)" / "断桥残雪 (柔情版)" 抢先命中
+        if _norm_text(song_name) == _norm_text(title):
+            return meta
+        if fallback is None:
+            fallback = meta
+
+    return fallback
+
 
 def fetch_itunes_metadata(title: str, artist: str, regions: List[str] = None) -> Optional[OfficialMetadata]:
     if regions is None:
@@ -135,10 +206,22 @@ def fetch_netease_metadata(title: str, artist: str) -> Optional[OfficialMetadata
     return None
 
 def get_official_metadata(title: str, artist: str) -> OfficialMetadata:
+    """按优先级选取基准元数据：QQ 音乐 -> iTunes -> MusicBrainz -> 网易云 -> Fallback。"""
+    # 1. QQ 音乐优先：中文曲库覆盖最全，发行信息最准
+    meta = fetch_qq_metadata(title, artist)
+    if meta and meta.duration_seconds > 0:
+        if not meta.cover_url:
+            itunes_meta = fetch_itunes_metadata(title, artist)
+            if itunes_meta and itunes_meta.cover_url:
+                meta.cover_url = itunes_meta.cover_url
+        return meta
+
+    # 2. iTunes
     meta = fetch_itunes_metadata(title, artist)
     if meta and meta.duration_seconds > 0:
         return meta
 
+    # 3. MusicBrainz（缺封面时用网易云补齐）
     meta = fetch_musicbrainz_metadata(title, artist)
     if meta and meta.duration_seconds > 0:
         if not meta.cover_url:
@@ -147,6 +230,7 @@ def get_official_metadata(title: str, artist: str) -> OfficialMetadata:
                 meta.cover_url = ne_meta.cover_url
         return meta
 
+    # 4. 网易云
     meta = fetch_netease_metadata(title, artist)
     if meta and meta.duration_seconds > 0:
         return meta

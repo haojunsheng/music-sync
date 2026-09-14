@@ -2,6 +2,8 @@
 
 M1 是整条流水线的锚点：它的 title/artist/duration 会被拿去搜索所有音源。
 一旦这里取错歌，后面每个源都会搜错，所以匹配校验是重点回归对象。
+
+基准源优先级：QQ 音乐 -> iTunes -> MusicBrainz -> 网易云 -> Fallback。
 """
 import pytest
 
@@ -44,6 +46,149 @@ NE_MATCH_RESP = {
         ]
     }
 }
+
+QQ_URL_KEY = "c.y.qq.com/soso"
+
+QQ_SEARCH_RESP = {
+    "data": {
+        "song": {
+            "list": [
+                {
+                    "songname": "断桥残雪",
+                    "singer": [{"name": "许嵩"}],
+                    "albumname": "许嵩早期单曲集",
+                    "albummid": "001jmC6x1RMfh0",
+                    "interval": 227,
+                    "pubtime": 1180713600,
+                    "songmid": "004ENQPZ0dHaqy",
+                }
+            ]
+        }
+    }
+}
+
+
+def _song(name="断桥残雪", singer="许嵩", album="", albummid="", interval=227, pubtime=0):
+    return {
+        "songname": name,
+        "singer": [{"name": singer}],
+        "albumname": album,
+        "albummid": albummid,
+        "interval": interval,
+        "pubtime": pubtime,
+    }
+
+
+def _qq_resp(songs):
+    return {"data": {"song": {"list": songs}}}
+
+
+def _stub_all_sources(monkeypatch, **overrides):
+    """把所有基准元数据源打桩为 None，可用 overrides 单独覆盖某个源。"""
+    for name in (
+        "fetch_qq_metadata",
+        "fetch_itunes_metadata",
+        "fetch_musicbrainz_metadata",
+        "fetch_netease_metadata",
+    ):
+        monkeypatch.setattr(metadata, name, overrides.get(name, lambda t, a: None))
+
+
+class TestQqMetadata:
+    def test_parses_song(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, QQ_SEARCH_RESP)})
+        patch_session("music_sync.metadata.get_session", stub)
+
+        meta = metadata.fetch_qq_metadata("断桥残雪", "许嵩")
+        assert meta is not None
+        assert meta.title == "断桥残雪"
+        assert meta.artist == "许嵩"
+        assert meta.album == "许嵩早期单曲集"
+        assert meta.duration_seconds == 227
+        assert meta.source == "QQMusic"
+
+    def test_builds_cover_url_from_albummid(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, QQ_SEARCH_RESP)})
+        patch_session("music_sync.metadata.get_session", stub)
+        meta = metadata.fetch_qq_metadata("断桥残雪", "许嵩")
+        assert meta.cover_url == "https://y.gtimg.cn/music/photo_new/T002R300x300M000001jmC6x1RMfh0.jpg"
+
+    def test_release_year_comes_from_pubtime(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, QQ_SEARCH_RESP)})
+        patch_session("music_sync.metadata.get_session", stub)
+        assert metadata.fetch_qq_metadata("断桥残雪", "许嵩").release_year == "2007"
+
+    def test_missing_albummid_and_pubtime_yield_empty_fields(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, _qq_resp([_song(albummid="", pubtime=0)]))})
+        patch_session("music_sync.metadata.get_session", stub)
+        meta = metadata.fetch_qq_metadata("断桥残雪", "许嵩")
+        assert meta.cover_url == ""
+        assert meta.release_year == ""
+
+    def test_regression_skips_unrelated_first_hit(self, stub_session, patch_session, fake_response):
+        """回归：模糊搜索首条可能不是目标曲目，不能盲取 list[0]。"""
+        stub = stub_session({QQ_URL_KEY: fake_response(200, _qq_resp([
+            _song(name="幻听", album="梦游计", interval=273),
+            _song(name="断桥残雪", album="许嵩早期单曲集", interval=227),
+        ]))})
+        patch_session("music_sync.metadata.get_session", stub)
+
+        meta = metadata.fetch_qq_metadata("断桥残雪", "许嵩")
+        assert meta.title == "断桥残雪"
+        assert meta.duration_seconds == 227
+
+    def test_live_version_is_blacklisted(self, stub_session, patch_session, fake_response):
+        """Live 版时长与录音室版不同，不能拿来锚定基准。"""
+        stub = stub_session({QQ_URL_KEY: fake_response(200, _qq_resp([
+            _song(name="断桥残雪 (Live)", album="演唱会", interval=238),
+            _song(name="断桥残雪", album="许嵩早期单曲集", interval=227),
+        ]))})
+        patch_session("music_sync.metadata.get_session", stub)
+        assert metadata.fetch_qq_metadata("断桥残雪", "许嵩").duration_seconds == 227
+
+    def test_exact_title_preferred_over_suffixed(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, _qq_resp([
+            _song(name="断桥残雪 (电影版)", interval=230),
+            _song(name="断桥残雪", interval=227),
+        ]))})
+        patch_session("music_sync.metadata.get_session", stub)
+        meta = metadata.fetch_qq_metadata("断桥残雪", "许嵩")
+        assert meta.title == "断桥残雪"
+        assert meta.duration_seconds == 227
+
+    def test_skips_entry_without_interval(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, _qq_resp([_song(interval=0)]))})
+        patch_session("music_sync.metadata.get_session", stub)
+        assert metadata.fetch_qq_metadata("断桥残雪", "许嵩") is None
+
+    def test_artist_mismatch_returns_none(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, _qq_resp([_song(singer="沐萧")]))})
+        patch_session("music_sync.metadata.get_session", stub)
+        assert metadata.fetch_qq_metadata("断桥残雪", "许嵩") is None
+
+    def test_empty_list_returns_none(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, json_data=_qq_resp([]))})
+        patch_session("music_sync.metadata.get_session", stub)
+        assert metadata.fetch_qq_metadata("断桥残雪", "许嵩") is None
+
+    def test_http_error_returns_none(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(500, text="err")})
+        patch_session("music_sync.metadata.get_session", stub)
+        assert metadata.fetch_qq_metadata("断桥残雪", "许嵩") is None
+
+    def test_non_json_response_returns_none(self, stub_session, patch_session, fake_response):
+        stub = stub_session({QQ_URL_KEY: fake_response(200, text="<html>blocked</html>")})
+        patch_session("music_sync.metadata.get_session", stub)
+        assert metadata.fetch_qq_metadata("断桥残雪", "许嵩") is None
+
+    def test_multiple_singers_joined(self, stub_session, patch_session, fake_response):
+        resp = _qq_resp([
+            {"songname": "断桥残雪", "singer": [{"name": "许嵩"}, {"name": "何曼婷"}],
+             "albumname": "", "albummid": "", "interval": 227, "pubtime": 0}
+        ])
+        stub = stub_session({QQ_URL_KEY: fake_response(200, resp)})
+        patch_session("music_sync.metadata.get_session", stub)
+        assert metadata.fetch_qq_metadata("断桥残雪", "许嵩").artist == "许嵩/何曼婷"
 
 
 class TestItunesMetadata:
@@ -168,57 +313,94 @@ class TestNeteaseMetadata:
 
 class TestGetOfficialMetadataPriority:
     def test_fallback_preserves_user_input(self, monkeypatch):
-        monkeypatch.setattr(metadata, "fetch_itunes_metadata", lambda t, a: None)
-        monkeypatch.setattr(metadata, "fetch_musicbrainz_metadata", lambda t, a: None)
-        monkeypatch.setattr(metadata, "fetch_netease_metadata", lambda t, a: None)
-
+        _stub_all_sources(monkeypatch)
         meta = metadata.get_official_metadata("断桥残雪", "许嵩")
         assert meta.source == "Fallback"
         assert meta.title == "断桥残雪"
         assert meta.artist == "许嵩"
         assert meta.duration_seconds == 0
 
-    def test_itunes_takes_precedence(self, monkeypatch):
-        itunes = metadata.OfficialMetadata("断桥残雪", "许嵩", "A", 227, source="iTunes (CN)")
-        monkeypatch.setattr(metadata, "fetch_itunes_metadata", lambda t, a: itunes)
-        monkeypatch.setattr(
-            metadata,
-            "fetch_musicbrainz_metadata",
-            lambda t, a: pytest.fail("iTunes 命中后不应再查 MusicBrainz"),
+    def test_qq_is_the_primary_source(self, monkeypatch):
+        """回归：基准元数据首选 QQ 音乐，命中后不应再查其它源。"""
+        qq = metadata.OfficialMetadata(
+            "断桥残雪", "许嵩", "许嵩早期单曲集", 227, cover_url="http://qq/c.jpg", source="QQMusic"
+        )
+        _stub_all_sources(monkeypatch, fetch_qq_metadata=lambda t, a: qq)
+        assert metadata.get_official_metadata("断桥残雪", "许嵩").source == "QQMusic"
+
+    def test_qq_hit_does_not_consult_lower_priority_sources(self, monkeypatch):
+        qq = metadata.OfficialMetadata("断桥残雪", "许嵩", "", 227, cover_url="http://qq/c.jpg", source="QQMusic")
+        _stub_all_sources(
+            monkeypatch,
+            fetch_qq_metadata=lambda t, a: qq,
+            fetch_itunes_metadata=lambda t, a: pytest.fail("QQ 命中后不应再查 iTunes"),
+            fetch_musicbrainz_metadata=lambda t, a: pytest.fail("QQ 命中后不应再查 MusicBrainz"),
+            fetch_netease_metadata=lambda t, a: pytest.fail("QQ 命中后不应再查网易云"),
+        )
+        metadata.get_official_metadata("断桥残雪", "许嵩")
+
+    def test_qq_without_duration_falls_through_to_itunes(self, monkeypatch):
+        _stub_all_sources(
+            monkeypatch,
+            fetch_qq_metadata=lambda t, a: metadata.OfficialMetadata("断桥残雪", "许嵩", "", 0, source="QQMusic"),
+            fetch_itunes_metadata=lambda t, a: metadata.OfficialMetadata(
+                "断桥残雪", "许嵩", "", 227, source="iTunes (CN)"
+            ),
+        )
+        assert metadata.get_official_metadata("断桥残雪", "许嵩").source == "iTunes (CN)"
+
+    def test_qq_without_cover_backfills_from_itunes(self, monkeypatch):
+        _stub_all_sources(
+            monkeypatch,
+            fetch_qq_metadata=lambda t, a: metadata.OfficialMetadata(
+                "断桥残雪", "许嵩", "", 227, cover_url="", source="QQMusic"
+            ),
+            fetch_itunes_metadata=lambda t, a: metadata.OfficialMetadata(
+                "断桥残雪", "许嵩", "", 227, cover_url="http://itunes/c.jpg", source="iTunes (CN)"
+            ),
+        )
+        meta = metadata.get_official_metadata("断桥残雪", "许嵩")
+        assert meta.cover_url == "http://itunes/c.jpg"
+        assert meta.source == "QQMusic"
+
+    def test_itunes_used_when_qq_misses(self, monkeypatch):
+        _stub_all_sources(
+            monkeypatch,
+            fetch_itunes_metadata=lambda t, a: metadata.OfficialMetadata(
+                "断桥残雪", "许嵩", "A", 227, source="iTunes (CN)"
+            ),
+            fetch_musicbrainz_metadata=lambda t, a: pytest.fail("iTunes 命中后不应再查 MusicBrainz"),
         )
         assert metadata.get_official_metadata("断桥残雪", "许嵩").source == "iTunes (CN)"
 
     def test_itunes_without_duration_falls_through_to_musicbrainz(self, monkeypatch):
-        monkeypatch.setattr(
-            metadata,
-            "fetch_itunes_metadata",
-            lambda t, a: metadata.OfficialMetadata("断桥残雪", "许嵩", "", 0, source="iTunes (CN)"),
-        )
-        monkeypatch.setattr(
-            metadata,
-            "fetch_musicbrainz_metadata",
-            lambda t, a: metadata.OfficialMetadata("断桥残雪", "许嵩", "", 227, source="MusicBrainz"),
+        _stub_all_sources(
+            monkeypatch,
+            fetch_itunes_metadata=lambda t, a: metadata.OfficialMetadata(
+                "断桥残雪", "许嵩", "", 0, source="iTunes (CN)"
+            ),
+            fetch_musicbrainz_metadata=lambda t, a: metadata.OfficialMetadata(
+                "断桥残雪", "许嵩", "", 227, source="MusicBrainz"
+            ),
         )
         assert metadata.get_official_metadata("断桥残雪", "许嵩").source == "MusicBrainz"
 
     def test_netease_used_only_when_others_fail(self, monkeypatch):
-        monkeypatch.setattr(metadata, "fetch_itunes_metadata", lambda t, a: None)
-        monkeypatch.setattr(metadata, "fetch_musicbrainz_metadata", lambda t, a: None)
-        monkeypatch.setattr(
-            metadata,
-            "fetch_netease_metadata",
-            lambda t, a: metadata.OfficialMetadata("断桥残雪", "许嵩", "", 227, source="NetEase"),
+        _stub_all_sources(
+            monkeypatch,
+            fetch_netease_metadata=lambda t, a: metadata.OfficialMetadata(
+                "断桥残雪", "许嵩", "", 227, source="NetEase"
+            ),
         )
         assert metadata.get_official_metadata("断桥残雪", "许嵩").source == "NetEase"
 
     def test_musicbrainz_without_cover_backfills_from_netease(self, monkeypatch):
-        mb = metadata.OfficialMetadata("断桥残雪", "许嵩", "", 227, cover_url="", source="MusicBrainz")
-        monkeypatch.setattr(metadata, "fetch_itunes_metadata", lambda t, a: None)
-        monkeypatch.setattr(metadata, "fetch_musicbrainz_metadata", lambda t, a: mb)
-        monkeypatch.setattr(
-            metadata,
-            "fetch_netease_metadata",
-            lambda t, a: metadata.OfficialMetadata(
+        _stub_all_sources(
+            monkeypatch,
+            fetch_musicbrainz_metadata=lambda t, a: metadata.OfficialMetadata(
+                "断桥残雪", "许嵩", "", 227, cover_url="", source="MusicBrainz"
+            ),
+            fetch_netease_metadata=lambda t, a: metadata.OfficialMetadata(
                 "断桥残雪", "许嵩", "", 227, cover_url="http://cover", source="NetEase"
             ),
         )
