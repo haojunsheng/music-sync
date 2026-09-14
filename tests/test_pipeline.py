@@ -376,3 +376,104 @@ class TestCloudUploadFailure:
         ok = pipeline.sync_single_track("断桥残雪", "许嵩")
         assert ok is True
         assert "本地文件已就绪" in capsys.readouterr().out
+
+
+class TestSanitizePathComponent:
+    def test_replaces_illegal_chars(self):
+        assert pipeline.sanitize_path_component('a/b\\c:d*e?f"g<h>i|j') == "a_b_c_d_e_f_g_h_i_j"
+
+    def test_collapses_whitespace(self):
+        assert pipeline.sanitize_path_component("  a   b  ") == "a b"
+
+    def test_strips_leading_and_trailing_dots(self):
+        assert pipeline.sanitize_path_component("...name...") == "name"
+
+    def test_chinese_is_preserved(self):
+        assert pipeline.sanitize_path_component("断桥残雪") == "断桥残雪"
+
+    def test_empty_falls_back(self):
+        assert pipeline.sanitize_path_component("", "fallback") == "fallback"
+        assert pipeline.sanitize_path_component("   ", "fallback") == "fallback"
+
+    def test_only_dots_falls_back(self):
+        assert pipeline.sanitize_path_component(".", "fallback") == "fallback"
+
+    def test_long_name_truncated_by_bytes(self):
+        out = pipeline.sanitize_path_component("许" * 200)
+        assert len(out.encode("utf-8")) <= 150
+
+
+def _run_full_sync(monkeypatch, tmp_path, *, artist="许嵩", title="断桥残雪"):
+    """跑一次完整同步（下载/校验/打标全部打桩），返回实际写入路径。"""
+    from pathlib import Path
+
+    captured = {}
+
+    def fake_download(url, output_path, extra_headers=None):
+        captured["path"] = output_path
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"FAKE")
+        return True
+
+    src = FakeSource([_cand("flac", "flac", url="http://cdn/x.flac")])
+    _configure(monkeypatch, {"qq": src}, download_dir=tmp_path)
+    monkeypatch.setattr(
+        pipeline,
+        "get_official_metadata",
+        lambda t, a: OfficialMetadata(title, artist, "专辑", 227, source="QQMusic"),
+    )
+    monkeypatch.setattr(pipeline, "download_file", fake_download)
+    monkeypatch.setattr(pipeline, "validate_audio_file", lambda p, d, tol: (True, 227.0, "OK"))
+    monkeypatch.setattr(pipeline, "get_lyrics", lambda *a, **k: ("", False))
+    monkeypatch.setattr(pipeline, "apply_tags_and_verify", lambda *a, **k: (True, "ok"))
+
+    pipeline.sync_single_track(title, artist, no_upload=True)
+    return captured.get("path")
+
+
+class TestOutputPathLayout:
+    """下载文件按「歌手 / 歌曲名」分层存放。"""
+
+    def test_saved_under_artist_folder(self, monkeypatch, tmp_path):
+        path = _run_full_sync(monkeypatch, tmp_path)
+        assert path == str(tmp_path / "许嵩" / "断桥残雪.flac")
+
+    def test_artist_directory_is_created(self, monkeypatch, tmp_path):
+        _run_full_sync(monkeypatch, tmp_path)
+        assert (tmp_path / "许嵩").is_dir()
+
+    def test_slash_in_artist_is_sanitized(self, monkeypatch, tmp_path):
+        # 合唱曲目的 artist 形如 "许嵩/何曼婷"，不能产生多级目录
+        path = _run_full_sync(monkeypatch, tmp_path, artist="许嵩/何曼婷")
+        assert path == str(tmp_path / "许嵩_何曼婷" / "断桥残雪.flac")
+
+    def test_slash_in_title_is_sanitized(self, monkeypatch, tmp_path):
+        path = _run_full_sync(monkeypatch, tmp_path, title="A/B")
+        assert path == str(tmp_path / "许嵩" / "A_B.flac")
+
+    def test_empty_artist_falls_back_to_placeholder(self, monkeypatch, tmp_path):
+        path = _run_full_sync(monkeypatch, tmp_path, artist="")
+        assert path == str(tmp_path / "未知歌手" / "断桥残雪.flac")
+
+    def test_extension_follows_candidate(self, monkeypatch, tmp_path):
+        from pathlib import Path
+
+        captured = {}
+
+        def fake_download(url, output_path, extra_headers=None):
+            captured["path"] = output_path
+            p = Path(output_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"FAKE")
+            return True
+
+        src = FakeSource([_cand("320k", "mp3", url="http://cdn/x.mp3")])
+        _configure(monkeypatch, {"qq": src}, download_dir=tmp_path)
+        monkeypatch.setattr(pipeline, "download_file", fake_download)
+        monkeypatch.setattr(pipeline, "validate_audio_file", lambda p, d, tol: (True, 227.0, "OK"))
+        monkeypatch.setattr(pipeline, "get_lyrics", lambda *a, **k: ("", False))
+        monkeypatch.setattr(pipeline, "apply_tags_and_verify", lambda *a, **k: (True, "ok"))
+
+        pipeline.sync_single_track("断桥残雪", "许嵩", no_upload=True)
+        assert captured["path"] == str(tmp_path / "许嵩" / "断桥残雪.mp3")

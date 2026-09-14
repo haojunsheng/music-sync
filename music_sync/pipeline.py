@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,6 +19,22 @@ from music_sync.sources import get_source, SOURCE_REGISTRY
 from music_sync.sources.base import TrackCandidate
 
 console = Console()
+
+# 文件名/目录名中不允许出现的字符（含 Windows 保留字符与控制字符）
+_ILLEGAL_PATH_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+def sanitize_path_component(name: str, fallback: str = "Unknown") -> str:
+    """把文本净化为可安全用作目录名或文件名的片段。
+
+    - 非法字符（\\ / : * ? " < > | 及控制字符）替换为下划线
+    - 折叠连续空白，去掉首尾空格与点号
+    - 按 UTF-8 字节数限制长度（多数文件系统单个名称上限 255 字节）
+    """
+    cleaned = _ILLEGAL_PATH_CHARS.sub("_", (name or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    if len(cleaned.encode("utf-8")) > 150:
+        cleaned = cleaned.encode("utf-8")[:150].decode("utf-8", errors="ignore").strip(" .")
+    return cleaned or fallback
 
 # 无损音质档位
 LOSSLESS_QUALITIES = frozenset({"flac", "ape"})
@@ -155,11 +172,12 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
         console.print(f"[yellow]⚡ [Dry-Run 模式] 命中候选: {selected_candidate.title} | 音源: {selected_candidate.source} | 格式: {selected_candidate.file_ext} | 下载地址: {selected_candidate.download_url}[/yellow]")
         return True
 
-    # M4: 下载音频
+    # M4: 下载音频，按「歌手 / 歌曲名」组织目录
     dl_dir = Path(os.path.expanduser(cfg.download_dir))
-    dl_dir.mkdir(parents=True, exist_ok=True)
-    safe_filename = f"{target_artist} - {target_title}".replace("/", "_").replace("\\", "_")
-    output_path = str(dl_dir / f"{safe_filename}.{selected_candidate.file_ext}")
+    track_dir = dl_dir / sanitize_path_component(target_artist, "未知歌手")
+    track_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{sanitize_path_component(target_title, '未知曲目')}.{selected_candidate.file_ext}"
+    output_path = str(track_dir / filename)
 
     console.print(f"[dim]M4: 开始下载音频到: {output_path}[/dim]")
     if selected_candidate.source == "youtube":
