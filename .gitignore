@@ -1,0 +1,49 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- 虚拟环境 ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- 测试 / 类型检查 / 缓存 ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# --- 本地凭证与私有配置（切勿提交）---
+*.cookie
+cookies*.json
+*_cookie.json
+config.local.json
+secrets.json
+.env
+.env.*
+
+# --- 下载产物（音频/歌词默认不纳入版本管理）---
+*.mp3
+*.flac
+*.m4a
+*.ape
+*.lrc
+downloads/
