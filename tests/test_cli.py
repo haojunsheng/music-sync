@@ -71,10 +71,10 @@ class TestSyncCommand:
     def test_sync_passes_arguments_and_respects_quality_policy(self, monkeypatch, capsys):
         captured = {}
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             captured.update(
                 title=title, artist=artist, album=album, dry_run=dry_run,
-                no_upload=no_upload, flac_only=flac_only,
+                no_upload=no_upload, flac_only=flac_only, force=force,
             )
             return True
 
@@ -87,12 +87,13 @@ class TestSyncCommand:
             "dry_run": True,
             "no_upload": False,
             "flac_only": False,
+            "force": False,
         }
 
     def test_flac_only_flag_is_forwarded(self, monkeypatch):
         captured = {}
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             captured["flac_only"] = flac_only
             return True
 
@@ -103,7 +104,7 @@ class TestSyncCommand:
     def test_no_upload_flag_is_forwarded(self, monkeypatch):
         captured = {}
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             captured["no_upload"] = no_upload
             return True
 
@@ -116,8 +117,8 @@ class TestBatchCommand:
     def test_batch_forwards_csv_path(self, monkeypatch, tmp_path):
         captured = {}
 
-        def fake_batch(csv_path, dry_run=False, no_upload=False):
-            captured.update(csv_path=csv_path, dry_run=dry_run)
+        def fake_batch(csv_path, dry_run=False, no_upload=False, force=False):
+            captured.update(csv_path=csv_path, dry_run=dry_run, force=force)
 
         monkeypatch.setattr(cli, "sync_batch_csv", fake_batch)
         _run(monkeypatch, ["batch", "songs.csv", "--dry-run"])
@@ -129,17 +130,17 @@ class TestArtistCommand:
     def test_forwards_name_and_limit(self, monkeypatch):
         captured = {}
 
-        def fake_artist(artist, limit=50, dry_run=False, no_upload=False):
-            captured.update(artist=artist, limit=limit, dry_run=dry_run, no_upload=no_upload)
+        def fake_artist(artist, limit=50, dry_run=False, no_upload=False, force=False):
+            captured.update(artist=artist, limit=limit, dry_run=dry_run, no_upload=no_upload, force=force)
 
         monkeypatch.setattr(cli, "sync_artist", fake_artist)
         _run(monkeypatch, ["artist", "许嵩", "--limit", "30"])
-        assert captured == {"artist": "许嵩", "limit": 30, "dry_run": False, "no_upload": False}
+        assert captured == {"artist": "许嵩", "limit": 30, "dry_run": False, "no_upload": False, "force": False}
 
     def test_default_limit_is_50(self, monkeypatch):
         captured = {}
 
-        def fake_artist(artist, limit=50, dry_run=False, no_upload=False):
+        def fake_artist(artist, limit=50, dry_run=False, no_upload=False, force=False):
             captured["limit"] = limit
 
         monkeypatch.setattr(cli, "sync_artist", fake_artist)
@@ -149,14 +150,60 @@ class TestArtistCommand:
     def test_flags_are_forwarded(self, monkeypatch):
         captured = {}
 
-        def fake_artist(artist, limit=50, dry_run=False, no_upload=False):
-            captured.update(dry_run=dry_run, no_upload=no_upload)
+        def fake_artist(artist, limit=50, dry_run=False, no_upload=False, force=False):
+            captured.update(dry_run=dry_run, no_upload=no_upload, force=force)
 
         monkeypatch.setattr(cli, "sync_artist", fake_artist)
         _run(monkeypatch, ["artist", "许嵩", "--dry-run", "--no-upload"])
-        assert captured == {"dry_run": True, "no_upload": True}
+        assert captured == {"dry_run": True, "no_upload": True, "force": False}
 
     def test_artist_requires_a_name(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["music-sync", "artist"])
         with pytest.raises(SystemExit):
             cli.main()
+
+
+class TestForceFlag:
+    """--force：忽略本地已有文件，强制重新下载。"""
+
+    def test_sync_force_is_forwarded(self, monkeypatch):
+        captured = {}
+
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
+            captured["force"] = force
+            return True
+
+        monkeypatch.setattr(cli, "sync_single_track", fake_sync)
+        _run(monkeypatch, ["sync", "断桥残雪", "--force"])
+        assert captured["force"] is True
+
+    def test_sync_force_defaults_to_false(self, monkeypatch):
+        captured = {}
+
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
+            captured["force"] = force
+            return True
+
+        monkeypatch.setattr(cli, "sync_single_track", fake_sync)
+        _run(monkeypatch, ["sync", "断桥残雪"])
+        assert captured["force"] is False
+
+    def test_batch_force_is_forwarded(self, monkeypatch):
+        captured = {}
+
+        def fake_batch(csv_path, dry_run=False, no_upload=False, force=False):
+            captured["force"] = force
+
+        monkeypatch.setattr(cli, "sync_batch_csv", fake_batch)
+        _run(monkeypatch, ["batch", "songs.csv", "--force"])
+        assert captured["force"] is True
+
+    def test_artist_force_is_forwarded(self, monkeypatch):
+        captured = {}
+
+        def fake_artist(artist, limit=50, dry_run=False, no_upload=False, force=False):
+            captured["force"] = force
+
+        monkeypatch.setattr(cli, "sync_artist", fake_artist)
+        _run(monkeypatch, ["artist", "许嵩", "--force"])
+        assert captured["force"] is True

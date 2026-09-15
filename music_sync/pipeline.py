@@ -70,21 +70,34 @@ def quality_rank(candidate: TrackCandidate, accepted: List[str]) -> Optional[int
     return None
 
 def download_file(url: str, output_path: str, extra_headers: dict = None) -> bool:
+    """下载到临时文件，完整拿到后才原子替换目标文件。
+
+    直接以 "wb" 打开目标路径时，下载中断会把已有文件截断成半截儿；
+    配合 --force 覆盖旧文件时这会直接毁掉用户现成的好文件。
+    """
     session = get_session()
+    tmp_path = f"{output_path}.part"
     try:
         resp = session.get(url, headers=extra_headers or {}, stream=True, timeout=30)
         if resp.status_code == 200:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "wb") as f:
+            with open(tmp_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
                     if chunk:
                         f.write(chunk)
+            os.replace(tmp_path, output_path)
             return True
     except Exception as e:
         console.print(f"[red]下载失败: {e}[/red]")
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
     return False
 
-def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bool = False, no_upload: bool = False, flac_only: bool = False) -> bool:
+def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bool = False, no_upload: bool = False, flac_only: bool = False, force: bool = False) -> bool:
     cfg = load_config()
     console.print(f"\n[bold cyan]>>> 开始处理: {title} - {artist}[/bold cyan]")
 
@@ -193,32 +206,47 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
     filename = f"{sanitize_path_component(target_title, '未知曲目')}.{selected_candidate.file_ext}"
     output_path = str(track_dir / filename)
 
-    console.print(f"[dim]M4: 开始下载音频到: {output_path}[/dim]")
-    if selected_candidate.source == "youtube":
-        # YouTube 特殊处理 (yt-dlp)
-        cmd = ["yt-dlp", "-x", "--audio-format", "m4a", "-o", output_path, selected_candidate.download_url]
-        subprocess.run(cmd, capture_output=True)
-        ok = os.path.exists(output_path)
-    else:
-        headers = {}
-        if selected_candidate.source == "bilibili":
-            headers = {"Referer": "https://www.bilibili.com"}
-        ok = download_file(selected_candidate.download_url, output_path, headers)
+    # 本地已有同名文件时不再重新下载：音源检索出来的 ext 与本地一致才会命中同一路径。
+    # 命中后仍要实测时长，避免把之前下残/下错的文件当成好的复用。
+    reused_local = False
+    if not force and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        valid, existing_len, msg = validate_audio_file(output_path, target_duration, cfg.tolerance_seconds)
+        if valid:
+            reused_local = True
+            console.print(
+                f"[dim]M4: 本地已存在，跳过下载: {output_path}[/dim]"
+            )
+            console.print(f"  [green]✓[/green] 复用本地文件，实测时长 {existing_len:.1f}s")
+        else:
+            console.print(f"  [yellow]↳ 本地同名文件校验未通过（{msg}），重新下载[/yellow]")
 
-    if not ok or not os.path.exists(output_path):
-        console.print("[red]❌ 音频文件下载失败[/red]")
-        return False
+    if not reused_local:
+        console.print(f"[dim]M4: 开始下载音频到: {output_path}[/dim]")
+        if selected_candidate.source == "youtube":
+            # YouTube 特殊处理 (yt-dlp)
+            cmd = ["yt-dlp", "-x", "--audio-format", "m4a", "-o", output_path, selected_candidate.download_url]
+            subprocess.run(cmd, capture_output=True)
+            ok = os.path.exists(output_path)
+        else:
+            headers = {}
+            if selected_candidate.source == "bilibili":
+                headers = {"Referer": "https://www.bilibili.com"}
+            ok = download_file(selected_candidate.download_url, output_path, headers)
 
-    # 实测时长二次校验
-    valid, actual_len, msg = validate_audio_file(output_path, target_duration, cfg.tolerance_seconds)
-    if not valid:
-        console.print(f"[red]❌ 文件时长校验失败: {msg}，丢弃文件[/red]")
-        try:
-            os.remove(output_path)
-        except Exception:
-            pass
-        return False
-    console.print(f"  [green]✓[/green] 音频实测时长校验通过 ({actual_len:.1f}s)")
+        if not ok or not os.path.exists(output_path):
+            console.print("[red]❌ 音频文件下载失败[/red]")
+            return False
+
+        # 实测时长二次校验
+        valid, actual_len, msg = validate_audio_file(output_path, target_duration, cfg.tolerance_seconds)
+        if not valid:
+            console.print(f"[red]❌ 文件时长校验失败: {msg}，丢弃文件[/red]")
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+            return False
+        console.print(f"  [green]✓[/green] 音频实测时长校验通过 ({actual_len:.1f}s)")
 
     # M5: 获取歌词与写入标签
     console.print("[dim]M5: 获取歌词与写入元数据标签...[/dim]")
@@ -252,7 +280,7 @@ def sync_single_track(title: str, artist: str = "", album: str = "", dry_run: bo
         console.print(f"[yellow]⚠️ 云盘同步未完成，但本地文件已就绪: {output_path}[/yellow]")
     return True
 
-def sync_song_list(songs: List[dict], dry_run: bool = False, no_upload: bool = False, title: str = "批量同步结果汇总"):
+def sync_song_list(songs: List[dict], dry_run: bool = False, no_upload: bool = False, title: str = "批量同步结果汇总", force: bool = False):
     """逐首同步并输出汇总表，返回 (成功数, 失败数)。"""
     console.print(f"[bold cyan]开始批量同步，共 {len(songs)} 首歌曲...[/bold cyan]")
     success_count = 0
@@ -263,7 +291,7 @@ def sync_song_list(songs: List[dict], dry_run: bool = False, no_upload: bool = F
         name = s.get("title", "")
         artist = s.get("artist", "")
         try:
-            ok = sync_single_track(name, artist, s.get("album", ""), dry_run, no_upload)
+            ok = sync_single_track(name, artist, s.get("album", ""), dry_run, no_upload, force=force)
         except Exception as e:
             fail_count += 1
             results.append((name, artist, f"异常: {e}", "red"))
@@ -288,7 +316,7 @@ def sync_song_list(songs: List[dict], dry_run: bool = False, no_upload: bool = F
     return success_count, fail_count
 
 
-def sync_batch_csv(csv_path: str, dry_run: bool = False, no_upload: bool = False):
+def sync_batch_csv(csv_path: str, dry_run: bool = False, no_upload: bool = False, force: bool = False):
     """从 CSV 批量同步。表头格式: title,artist[,album]"""
     if not os.path.exists(csv_path):
         console.print(f"[red]CSV 文件不存在: {csv_path}[/red]")
@@ -304,10 +332,10 @@ def sync_batch_csv(csv_path: str, dry_run: bool = False, no_upload: bool = False
             if title:
                 songs.append({"title": title, "artist": artist, "album": album})
 
-    sync_song_list(songs, dry_run, no_upload)
+    sync_song_list(songs, dry_run, no_upload, force=force)
 
 
-def sync_artist(artist: str, limit: int = 50, dry_run: bool = False, no_upload: bool = False):
+def sync_artist(artist: str, limit: int = 50, dry_run: bool = False, no_upload: bool = False, force: bool = False):
     """批量同步某歌手的热门歌曲（数量可通过 limit 调整）。"""
     console.print(f"\n[bold cyan]>>> 获取歌手热门歌曲: {artist}（最多 {limit} 首）[/bold cyan]")
     songs = get_artist_top_songs(artist, limit)
@@ -319,4 +347,4 @@ def sync_artist(artist: str, limit: int = 50, dry_run: bool = False, no_upload: 
     for i, s in enumerate(songs, 1):
         console.print(f"    [dim]{i:>3}. {s['title']} - {s['artist']}[/dim]")
 
-    sync_song_list(songs, dry_run, no_upload, title=f"{artist} · 热门歌曲同步结果")
+    sync_song_list(songs, dry_run, no_upload, title=f"{artist} · 热门歌曲同步结果", force=force)

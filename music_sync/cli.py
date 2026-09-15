@@ -28,14 +28,16 @@ def handle_sync(args):
         album=args.album or "",
         dry_run=args.dry_run,
         no_upload=args.no_upload,
-        flac_only=getattr(args, "flac_only", False)
+        flac_only=getattr(args, "flac_only", False),
+        force=getattr(args, "force", False)
     )
 
 def handle_batch(args):
     sync_batch_csv(
         csv_path=args.csv_file,
         dry_run=args.dry_run,
-        no_upload=args.no_upload
+        no_upload=args.no_upload,
+        force=getattr(args, "force", False)
     )
 
 def handle_artist(args):
@@ -43,7 +45,8 @@ def handle_artist(args):
         artist=args.name,
         limit=args.limit,
         dry_run=args.dry_run,
-        no_upload=args.no_upload
+        no_upload=args.no_upload,
+        force=getattr(args, "force", False)
     )
 
 def handle_config(args):
@@ -117,12 +120,14 @@ def main():
     sync_parser.add_argument("--dry-run", action="store_true", help="只预览匹配结果，不下载与上传")
     sync_parser.add_argument("--no-upload", action="store_true", help="仅下载打标，不上传网易云云盘")
     sync_parser.add_argument("--flac-only", action="store_true", help="强制只接受无损音源")
+    sync_parser.add_argument("--force", action="store_true", help="忽略本地已有文件，强制重新下载")
 
     # batch
     batch_parser = subparsers.add_parser("batch", help="批量同步 CSV 文件中的歌曲")
     batch_parser.add_argument("csv_file", help="CSV 文件路径 (格式: title,artist[,album])")
     batch_parser.add_argument("--dry-run", action="store_true", help="只预览，不下载与上传")
     batch_parser.add_argument("--no-upload", action="store_true", help="仅下载打标，不上传")
+    batch_parser.add_argument("--force", action="store_true", help="忽略本地已有文件，强制重新下载")
 
     # artist
     artist_parser = subparsers.add_parser("artist", help="批量同步某歌手的热门歌曲")
@@ -133,6 +138,7 @@ def main():
     )
     artist_parser.add_argument("--dry-run", action="store_true", help="只预览，不下载与上传")
     artist_parser.add_argument("--no-upload", action="store_true", help="仅下载打标，不上传")
+    artist_parser.add_argument("--force", action="store_true", help="忽略本地已有文件，强制重新下载")
 
     # config
     config_parser = subparsers.add_parser("config", help="查看或修改配置")

@@ -278,6 +278,36 @@ class TestDownloadFile:
         patch_session("music_sync.pipeline.get_session", Boom())
         assert pipeline.download_file("http://cdn.example.com/a.flac", str(tmp_path / "x.flac")) is False
 
+    def test_failed_download_does_not_truncate_existing_file(self, stub_session, patch_session, fake_response, tmp_path):
+        """下载中断（非 200）时，已有的好文件必须原样保留。"""
+        target = tmp_path / "song.flac"
+        target.write_bytes(b"GOOD")
+
+        stub = stub_session({"cdn.example.com": fake_response(500, text="error")})
+        patch_session("music_sync.pipeline.get_session", stub)
+
+        assert pipeline.download_file("http://cdn.example.com/a.flac", str(target)) is False
+        assert target.read_bytes() == b"GOOD"
+
+    def test_failed_download_cleans_up_part_file(self, stub_session, patch_session, fake_response, tmp_path):
+        stub = stub_session({"cdn.example.com": fake_response(500, text="error")})
+        patch_session("music_sync.pipeline.get_session", stub)
+
+        target = tmp_path / "song.flac"
+        pipeline.download_file("http://cdn.example.com/a.flac", str(target))
+        assert not (tmp_path / "song.flac.part").exists()
+
+    def test_success_replaces_existing_file_atomically(self, stub_session, patch_session, fake_response, tmp_path):
+        target = tmp_path / "song.flac"
+        target.write_bytes(b"OLD")
+
+        stub = stub_session({"cdn.example.com": fake_response(200, content=b"NEW")})
+        patch_session("music_sync.pipeline.get_session", stub)
+
+        assert pipeline.download_file("http://cdn.example.com/a.flac", str(target)) is True
+        assert target.read_bytes() == b"NEW"
+        assert not (tmp_path / "song.flac.part").exists()
+
 
 class TestBatchSync:
     def test_batch_reports_success_and_failure(self, monkeypatch, tmp_path, capsys):
@@ -288,7 +318,7 @@ class TestBatchSync:
 
         results = {"断桥残雪": True, "幻听": False}
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             return results[title]
 
         monkeypatch.setattr(pipeline, "sync_single_track", fake_sync)
@@ -305,7 +335,7 @@ class TestBatchSync:
 
         seen = []
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             seen.append((title, artist))
             return True
 
@@ -320,7 +350,7 @@ class TestBatchSync:
 
         seen = []
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             seen.append(title)
             return True
 
@@ -336,7 +366,7 @@ class TestBatchSync:
         csv_file = tmp_path / "x.csv"
         csv_file.write_text("title,artist\nA,甲\nB,乙\n", encoding="utf-8")
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             if title == "A":
                 raise RuntimeError("boom")
             return True
@@ -552,7 +582,7 @@ class TestSyncArtist:
         monkeypatch.setattr(pipeline, "get_artist_top_songs", lambda a, limit: self._songs())
         seen = []
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             seen.append((title, artist, album))
             return True
 
@@ -581,7 +611,7 @@ class TestSyncArtist:
         monkeypatch.setattr(pipeline, "get_artist_top_songs", lambda a, limit: self._songs())
         monkeypatch.setattr(
             pipeline, "sync_single_track",
-            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False: True,
+            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False: True,
         )
         pipeline.sync_artist("许嵩", limit=2)
         out = capsys.readouterr().out
@@ -593,7 +623,7 @@ class TestSyncArtist:
         results = {"素颜": True, "幻听": False}
         monkeypatch.setattr(
             pipeline, "sync_single_track",
-            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False: results[title],
+            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False: results[title],
         )
         pipeline.sync_artist("许嵩", limit=2)
         out = capsys.readouterr().out
@@ -604,7 +634,7 @@ class TestSyncArtist:
         monkeypatch.setattr(pipeline, "get_artist_top_songs", lambda a, limit: self._songs())
         seen = []
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             seen.append(title)
             if title == "素颜":
                 raise RuntimeError("boom")
@@ -622,17 +652,124 @@ class TestSyncSongList:
         results = {"A": True, "B": False}
         monkeypatch.setattr(
             pipeline, "sync_single_track",
-            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False: results[title],
+            lambda title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False: results[title],
         )
         assert pipeline.sync_song_list(songs) == (1, 1)
 
     def test_missing_optional_fields_are_tolerated(self, monkeypatch):
         seen = []
 
-        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False):
+        def fake_sync(title, artist="", album="", dry_run=False, no_upload=False, flac_only=False, force=False):
             seen.append((title, artist, album))
             return True
 
         monkeypatch.setattr(pipeline, "sync_single_track", fake_sync)
         pipeline.sync_song_list([{"title": "只有歌名"}])
         assert seen == [("只有歌名", "", "")]
+
+
+class TestLocalFileReuse:
+    """M4：本地已有同名文件时不再重复下载（仍走 M5 打标与 M6 云盘同步）。"""
+
+    def _run(self, monkeypatch, tmp_path, *, existing=True, force=False,
+             local_bytes=b"LOCAL", download_ok=True, no_upload=True):
+        from pathlib import Path
+
+        calls = {"download": 0, "upload": 0}
+
+        def fake_download(url, output_path, extra_headers=None):
+            calls["download"] += 1
+            if download_ok:
+                p = Path(output_path)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"DOWNLOADED")
+            return download_ok
+
+        class FakeNetEase:
+            def check_cloud_song_exists(self, title, artist):
+                return False
+
+            def upload_to_cloud(self, file_path, title, artist, album):
+                calls["upload"] += 1
+                return True
+
+        src = FakeSource([_cand("flac", "flac", url="http://cdn/x.flac")])
+        _configure(monkeypatch, {"qq": src}, download_dir=tmp_path)
+        monkeypatch.setattr(
+            pipeline, "get_official_metadata",
+            lambda t, a: OfficialMetadata("断桥残雪", "许嵩", "专辑", 227, source="QQMusic"),
+        )
+        monkeypatch.setattr(pipeline, "download_file", fake_download)
+        monkeypatch.setattr(pipeline, "NetEaseClient", FakeNetEase)
+        monkeypatch.setattr(pipeline, "get_lyrics", lambda *a, **k: ("", False))
+        monkeypatch.setattr(pipeline, "apply_tags_and_verify", lambda *a, **k: (True, "ok"))
+        # 只有内容为 BADLOCAL 的"坏文件"才判不通过，其余（含下载产物）一律合格
+        monkeypatch.setattr(
+            pipeline, "validate_audio_file",
+            lambda p, d, tol: (
+                (False, 100.0, "实测时长与基准差异超出容差")
+                if Path(p).read_bytes() == b"BADLOCAL"
+                else (True, 227.0, "OK")
+            ),
+        )
+
+        target = Path(tmp_path) / "许嵩" / "断桥残雪.flac"
+        if existing:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(local_bytes)
+
+        ok = pipeline.sync_single_track(
+            "断桥残雪", "许嵩", no_upload=no_upload, force=force
+        )
+        return ok, calls, target
+
+    def test_existing_file_skips_download(self, monkeypatch, tmp_path, capsys):
+        ok, calls, target = self._run(monkeypatch, tmp_path)
+        assert ok is True
+        assert calls["download"] == 0
+        out = capsys.readouterr().out
+        assert "跳过下载" in out
+        assert "复用本地文件" in out
+        # 本地文件内容未被覆盖
+        assert target.read_bytes() == b"LOCAL"
+
+    def test_existing_file_still_syncs_to_cloud(self, monkeypatch, tmp_path):
+        """复用本地文件后仍要补上云盘同步——上传失败重跑时不必重新下载。"""
+        ok, calls, _ = self._run(monkeypatch, tmp_path, no_upload=False)
+        assert ok is True
+        assert calls["download"] == 0
+        assert calls["upload"] == 1
+
+    def test_downloads_when_file_absent(self, monkeypatch, tmp_path, capsys):
+        ok, calls, target = self._run(monkeypatch, tmp_path, existing=False)
+        assert ok is True
+        assert calls["download"] == 1
+        assert "跳过下载" not in capsys.readouterr().out
+        assert target.read_bytes() == b"DOWNLOADED"
+
+    def test_redownloads_when_existing_file_fails_validation(self, monkeypatch, tmp_path, capsys):
+        """本地文件校验不过（下残/下错）时必须重新下载，不能盲目复用。"""
+        ok, calls, target = self._run(monkeypatch, tmp_path, local_bytes=b"BADLOCAL")
+        assert ok is True
+        assert calls["download"] == 1
+        assert "校验未通过" in capsys.readouterr().out
+        assert target.read_bytes() == b"DOWNLOADED"
+
+    def test_force_ignores_existing_file(self, monkeypatch, tmp_path):
+        ok, calls, _ = self._run(monkeypatch, tmp_path, force=True)
+        assert ok is True
+        assert calls["download"] == 1
+
+    def test_failed_download_keeps_existing_file_intact(self, monkeypatch, tmp_path):
+        """强制重下失败时，本地原有的好文件不能被破坏。"""
+        ok, calls, target = self._run(
+            monkeypatch, tmp_path, force=True, download_ok=False
+        )
+        assert ok is False
+        assert calls["download"] == 1
+        assert target.read_bytes() == b"LOCAL"
+
+    def test_zero_byte_local_file_is_not_reused(self, monkeypatch, tmp_path):
+        ok, calls, _ = self._run(monkeypatch, tmp_path, local_bytes=b"")
+        assert ok is True
+        assert calls["download"] == 1
