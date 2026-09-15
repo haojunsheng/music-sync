@@ -80,6 +80,15 @@ def handle_config(args):
     if args.allow_lossy is not None:
         cfg.allow_lossy_fallback = _as_bool(args.allow_lossy)
         changed = True
+    if args.apple_music_token is not None:
+        cfg.apple_music_token = args.apple_music_token
+        changed = True
+    if args.apple_music_storefront is not None:
+        cfg.apple_music_storefront = args.apple_music_storefront.strip().lower() or "cn"
+        changed = True
+    if args.apple_music_priority is not None:
+        cfg.apple_music_priority = _as_bool(args.apple_music_priority)
+        changed = True
 
     if changed:
         save_config(cfg)
@@ -99,6 +108,9 @@ def handle_config(args):
     table.add_row("1music_token", f"{cfg.token_1music[:15]}..." if len(cfg.token_1music) > 15 else (cfg.token_1music or "(未配置)"))
     table.add_row("download_dir", cfg.download_dir)
     table.add_row("bilibili_cookie", f"{cfg.bilibili_cookie[:20]}..." if len(cfg.bilibili_cookie) > 20 else (cfg.bilibili_cookie or "(未配置)"))
+    table.add_row("apple_music_token", f"{cfg.apple_music_token[:20]}..." if len(cfg.apple_music_token) > 20 else (cfg.apple_music_token or "(未配置)"))
+    table.add_row("apple_music_storefront", cfg.apple_music_storefront)
+    table.add_row("apple_music_priority", str(cfg.apple_music_priority))
 
     console.print(table)
 
@@ -153,6 +165,18 @@ def main():
         help="可接受音质档位，按优先级从高到低用逗号分隔，例如 flac,ape,320k"
     )
     config_parser.add_argument("--allow-lossy", help="是否允许 320k 等有损兜底 (true/false)")
+    config_parser.add_argument(
+        "--apple-music-token",
+        help="设置 Apple Music 开发者 token（仅用于取基准元数据与高清封面）"
+    )
+    config_parser.add_argument(
+        "--apple-music-storefront",
+        help="设置 Apple Music 区域，默认 cn"
+    )
+    config_parser.add_argument(
+        "--apple-music-priority",
+        help="Apple Music 是否作为首选元数据源 (true/false)，默认 true"
+    )
 
     args = parser.parse_args()
 

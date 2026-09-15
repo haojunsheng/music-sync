@@ -36,6 +36,7 @@ htmlcov/
 *.cookie
 cookies*.json
 *_cookie.json
+config.json
 config.local.json
 secrets.json
 .env

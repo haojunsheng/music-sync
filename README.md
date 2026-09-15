@@ -10,7 +10,7 @@
 
 ## 功能特性
 
-- **元数据锚点**：QQ 音乐 → iTunes → MusicBrainz → 网易云，逐级回退，拿不到就降级为原始输入
+- **元数据锚点**：Apple Music（可选，配 token 后优先）→ QQ 音乐 → iTunes → MusicBrainz → 网易云，逐级回退，拿不到就降级为原始输入
 - **多音源聚合**：QQ / 咪咕 / 酷我 / 网易云 / 酷狗 / B站 / YouTube / 1music 八个音源，按配置顺序遍历
 - **无损优先策略**：命中无损立即停止检索；低于可接受档位（默认 `flac/ape/320k`）的候选直接丢弃
 - **黑名单过滤**：默认屏蔽 DJ / 慢摇 / remix / 翻唱 / live / 伴奏 / 加速减速变调等干扰版本
@@ -18,7 +18,7 @@
 - **标签写入 + 回读校验**：写入标题/歌手/专辑/歌词/封面后重新读取验证，不信任"写入成功"的返回值
 - **网易云云盘直传**：按官方 5 步流程走完 check → NOS 凭证 → 二进制流 → 资源登记 → 发布，非会员也能同步自有版权音频
 - **批量同步**：支持 CSV 歌单和「某歌手热门歌曲」两种批量入口，逐首隔离失败
-- **340 个单元测试**：全程离线打桩，不触网、不读写用户真实配置
+- **395 个单元测试**：全程离线打桩，不触网、不读写用户真实配置
 
 ## 环境要求
 
@@ -95,6 +95,47 @@ python3 -m venv .venv
 - **云盘已有该曲目** → 跳过上传
 - 下载先落到 `<文件>.part`，完整拿到后才原子替换目标文件；下载中断不会把已有的好文件截断
 
+## 基准元数据源
+
+M1 按优先级向下列源要「基准元数据」（歌名/歌手/专辑/时长/封面），命中即停：
+
+```
+Apple Music → QQ 音乐 → iTunes → MusicBrainz → 网易云 → Fallback(原始输入)
+```
+
+| 源 | 需要凭证 | 特点 |
+| --- | --- | --- |
+| Apple Music | `apple_music_token` | 毫秒级时长、ISRC、精确发行日期；封面最长边可达 3000px（其他源只给 300~600px）。**未配 token 直接跳过** |
+| QQ 音乐 | 无需（VIP 直链才要 Cookie） | 中文曲库覆盖最全，发行信息最准 |
+| iTunes | 无需 | Apple 公开接口，自动试 CN/US/JP 多区 |
+| MusicBrainz | 无需 | 缺封面时用网易云补齐 |
+| 网易云 | 无需 | 兜底 |
+
+### Apple Music 只能做元数据源，不能做音源
+
+Apple Music 的完整音轨受 **FairPlay DRM** 保护，网页播放器的 Bearer token 换不到可解密的音频流——官方 `previews` 只有 30 秒片段，歌词接口对该 token 也返回 404。本项目不做 DRM 绕过，所以 Apple Music 只参与 M1（元数据 + 高清封面），**音频仍然从 `sources/` 下的普通音源下载**。
+
+```bash
+# 配置（token 是网页播放器那种 Bearer JWT，从 music.apple.com 的请求头里取）
+.venv/bin/python -m music_sync config --apple-music-token "<Apple Music Bearer token>"
+.venv/bin/python -m music_sync config --apple-music-storefront cn   # 区域，默认 cn
+.venv/bin/python -m music_sync config --apple-music-priority false  # 降级到 QQ 之后
+```
+
+> token 是短期凭证（一般几个月过期）。过期后 M1 会打印提示并**自动回退**到 QQ 音乐，不会让整条流水线失败。
+
+**开关 `apple_music_priority` 怎么选：**
+
+- `true`（默认）—— Apple Music 命中即用它的歌名/歌手/专辑/发行年。
+- `false` —— 退到 QQ 音乐之后、iTunes 之前。中文曲目优先保 QQ 的发行信息，非中文曲目仍由 Apple 兜住。**升级既有曲库时建议先关掉**，避免同一首歌因源头不同被归到另一个歌手目录下。
+
+### 命名归一化（Apple 数据的两处「水土不服」）
+
+Apple 的元数据在中文曲目上有两个和 QQ 不一致的习惯，直接沿用会让本地曲库出现重复文件，所以这里做了收敛（只在「去掉修饰后与用户查询完全一致」时才动手，不会误伤）：
+
+- **曲名尾部括注**：Apple 把影视出处写进曲名，如 `后会无期 (《诡案》网络剧插曲)`；归一化为用户查询的 `后会无期`，避免上一轮下的 `后会无期.flac` 这轮复用不上、白下一遍。
+- **合作歌手排序**：Apple 给 `汪苏泷 & 徐良`，QQ 给 `徐良/汪苏泷`。归档目录取首位歌手，若不处理，用「徐良」查的歌会被归进 `汪苏泷/`，同一首歌在曲库里分成两份。归一化会把**查询歌手提到首位**（不增不减歌手）。
+
 ## 音源与音质策略
 
 音源遍历顺序取自配置项 `sources`，默认：
@@ -133,10 +174,13 @@ qq → migu → kuwo → netease → kugou → bilibili → youtube → 1music
 .venv/bin/python -m music_sync config --allow-lossy false      # 只收无损
 .venv/bin/python -m music_sync config --tolerance-seconds 5     # 收紧时长容差
 .venv/bin/python -m music_sync config --bilibili-cookie "<B站 Cookie>"
+.venv/bin/python -m music_sync config --apple-music-token "<Apple Music Bearer token>"
+.venv/bin/python -m music_sync config --apple-music-storefront cn
+.venv/bin/python -m music_sync config --apple-music-priority false
 .venv/bin/python -m music_sync config                          # 打印当前配置
 ```
 
-主要配置项：`tolerance_seconds`、`quality_priority`、`allow_lossy_fallback`、`sources`、`download_dir`、`blacklist_keywords`、`use_system_proxy`，以及各音源的 Cookie / Token。
+主要配置项：`tolerance_seconds`、`quality_priority`、`allow_lossy_fallback`、`sources`、`download_dir`、`blacklist_keywords`、`use_system_proxy`，以及各音源的 Cookie / Token（含 `apple_music_token` / `apple_music_storefront` / `apple_music_priority`）。
 
 > `*_cookie.json`、`.env`、音频产物已在 `.gitignore` 中排除，**切勿把凭证提交进仓库**。
 
@@ -169,7 +213,7 @@ music_sync/
 ├── cli.py              # 命令行入口与子命令
 ├── pipeline.py         # 主流程编排（M1~M6）+ 批量/歌手同步
 ├── config.py           # 配置读写与默认值
-├── metadata.py         # 基准元数据获取（QQ/iTunes/MusicBrainz/网易云）
+├── metadata.py         # 基准元数据获取（Apple Music/QQ/iTunes/MusicBrainz/网易云）
 ├── artist.py           # 歌手热门歌曲列表（QQ 优先，网易云回退）
 ├── netease.py          # 网易云客户端：登录、云盘查重、5 步直传
 ├── netease_crypto.py   # weapi / eapi 加密实现
@@ -178,7 +222,7 @@ music_sync/
 ├── validator.py        # 时长/艺人匹配校验
 ├── http.py             # 统一 session（重试、超时、代理）
 └── sources/            # 八个音源适配器，统一 TrackCandidate 结构
-tests/                  # 340 个单元测试
+tests/                  # 395 个单元测试
 ```
 
 新增音源只需实现 `BaseSource.search_and_resolve()` 并在 `sources/__init__.py` 的 `SOURCE_REGISTRY` 注册。
@@ -187,7 +231,7 @@ tests/                  # 340 个单元测试
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest          # 340 个用例
+.venv/bin/python -m pytest          # 395 个用例
 ```
 
 测试有两条硬约束（见 `tests/conftest.py`）：
@@ -202,3 +246,5 @@ tests/                  # 340 个单元测试
 ## 免责声明
 
 仅供个人学习与自用。请遵守各音乐平台的版权与用户协议，不要用于分发或商业用途。
+
+Apple Music 集成**只读取目录元数据**（歌名/歌手/专辑/时长/封面），不下载、不解密、不绕过其 DRM；token 请自行获取并只保存在本机 `~/.config/music-sync/config.json`（已在 `.gitignore` 覆盖范围之外，**切勿提交进仓库**）。
