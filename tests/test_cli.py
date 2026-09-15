@@ -58,38 +58,6 @@ class TestConfigCommand:
         _run(monkeypatch, ["config", "--qq-cookie", "uin=123"])
         assert config_mod.load_config().qq_cookie == "uin=123"
 
-    def test_sets_apple_music_token(self, monkeypatch):
-        _run(monkeypatch, ["config", "--apple-music-token", "eyJhbGciOi.fake.token"])
-        assert config_mod.load_config().apple_music_token == "eyJhbGciOi.fake.token"
-
-    def test_clears_apple_music_token(self, monkeypatch):
-        """空串是有效输入（关闭 Apple Music 源），不能跟「未传参」混为一谈。"""
-        _run(monkeypatch, ["config", "--apple-music-token", "tok"])
-        _run(monkeypatch, ["config", "--apple-music-token", ""])
-        assert config_mod.load_config().apple_music_token == ""
-
-    def test_sets_apple_music_storefront_lowercased(self, monkeypatch):
-        _run(monkeypatch, ["config", "--apple-music-storefront", " JP "])
-        assert config_mod.load_config().apple_music_storefront == "jp"
-
-    def test_empty_storefront_falls_back_to_cn(self, monkeypatch):
-        _run(monkeypatch, ["config", "--apple-music-storefront", "  "])
-        assert config_mod.load_config().apple_music_storefront == "cn"
-
-    def test_sets_apple_music_priority_false(self, monkeypatch):
-        _run(monkeypatch, ["config", "--apple-music-priority", "false"])
-        assert config_mod.load_config().apple_music_priority is False
-
-    def test_apple_music_priority_defaults_to_true(self, monkeypatch):
-        assert config_mod.load_config().apple_music_priority is True
-
-    def test_shows_apple_music_settings(self, monkeypatch, capsys):
-        _run(monkeypatch, ["config"])
-        out = capsys.readouterr().out
-        assert "apple_music_token" in out
-        assert "apple_music_storefront" in out
-        assert "apple_music_priority" in out
-
     def test_no_change_when_no_flags(self, monkeypatch, tmp_path):
         # 不带任何修改参数时不应写盘（文件内容保持不变）
         _run(monkeypatch, ["config"])

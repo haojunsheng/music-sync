@@ -27,16 +27,6 @@ class Config:
     sources: List[str] = field(default_factory=lambda: ["qq", "migu", "kuwo", "netease", "kugou", "bilibili", "youtube", "1music"])
     qq_cookie: str = ""
     netease_cookie: str = ""
-    # Apple Music 开发者 token（网页播放器那种 Bearer token）。
-    # 只用于取基准元数据与高清封面 —— 完整音轨受 FairPlay DRM 保护，拿不到音频流。
-    apple_music_token: str = ""
-    # Apple Music 区域；中文曲库取 cn
-    apple_music_storefront: str = "cn"
-    # Apple Music 是否作为首选基准元数据源（需配 token 才生效）。
-    #   True  -> 命中即用 Apple 的时长/专辑/发行年/高清封面；
-    #   False -> 退到 QQ 音乐之后，优先保 QQ 的中文发行信息。
-    # 两种情况下未命中都会继续回退到 iTunes -> MusicBrainz -> 网易云。
-    apple_music_priority: bool = True
     use_system_proxy: bool = False
     token_1music: str = ""
     blacklist_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_BLACKLIST_KEYWORDS))
